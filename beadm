@@ -26,6 +26,9 @@ unset LC_ALL
 unset LANG
 PATH=${PATH}:/bin:/usr/bin:/sbin:/usr/sbin
 
+VERBOSE="NO"
+DOIT="YES"
+
 if [ $( uname -r | cut -d '.' -f1 ) -lt 8 ]
 then
   echo "ERROR: beadm only works on FreeBSD 8.0 or later"
@@ -46,6 +49,12 @@ __usage() {
   echo "  ${NAME} list"
   echo "  ${NAME} rename origBeName newBeName"
   exit 1
+}
+
++ () {
+  [ $VERBOSE = "YES" ]  && echo "+ $@" >/dev/tty
+  [ $DOIT = "YES" ]     || return 0
+  "$@"
 }
 
 __be_exist() { # 1=DATASET
@@ -80,7 +89,7 @@ __be_new() { # 1=SOURCE 2=TARGET
       echo "ERROR: Snapshot '${1}@${2##*/}' already exists"
       exit 1
     fi
-    if ! zfs snapshot -r ${1}@${2##*/} 1> /dev/null 2> /dev/null
+    if ! + zfs snapshot -r ${1}@${2##*/} 1> /dev/null 2> /dev/null
     then
       echo "ERROR: Cannot create snapshot '${1}@${2##*/}'"
       exit 1
@@ -103,9 +112,9 @@ EOF
         fi
         if  __be_snapshot ${1}
         then
-          zfs clone -o canmount=off ${OPTS} ${FS}@${1##*@} ${DATASET}
+          + zfs clone -o canmount=off ${OPTS} ${FS}@${1##*@} ${DATASET}
         else
-          zfs clone -o canmount=off ${OPTS} ${FS}@${2##*/} ${DATASET}
+          + zfs clone -o canmount=off ${OPTS} ${FS}@${2##*/} ${DATASET}
         fi
       done
   echo "Created successfully"
@@ -128,6 +137,15 @@ then
 fi
 
 BOOTFS=$( zpool list -H -o bootfs ${POOL} )
+
+while getopts "nv" opt
+do
+  case $opt in
+    (n) DOIT="NO"       ;;
+    (v) VERBOSE="YES"   ;;
+  esac
+done
+shift $(( $OPTIND - 1 ))
 
 case ${1} in
 
@@ -184,7 +202,7 @@ case ${1} in
       (2)
         if __be_snapshot ${2}
         then
-          if ! zfs snapshot -r ${POOL}/ROOT/${2} 2> /dev/null
+          if ! + zfs snapshot -r ${POOL}/ROOT/${2} 2> /dev/null
           then
             echo "ERROR: Cannot create '${2}' snapshot"
             exit 1
@@ -231,26 +249,26 @@ $( mount -p | awk '{print $1 " " $2}' )
 EOF
         if [ ${MOUNT} -eq 0 ]
         then
-          zfs set canmount=noauto ${POOL}/ROOT/${2}
-          zfs set mountpoint=${TMPMNT} ${POOL}/ROOT/${2}
-          zfs mount ${POOL}/ROOT/${2} 1> /dev/null 2> /dev/null
+          + zfs set canmount=noauto ${POOL}/ROOT/${2}
+          + zfs set mountpoint=${TMPMNT} ${POOL}/ROOT/${2}
+          + zfs mount ${POOL}/ROOT/${2} 1> /dev/null 2> /dev/null
         else
           TMPMNT=${MOUNT}
         fi
-        cp /boot/zfs/zpool.cache ${TMPMNT}/boot/zfs/zpool.cache # 2> /dev/null
+        + cp /boot/zfs/zpool.cache ${TMPMNT}/boot/zfs/zpool.cache # 2> /dev/null
         LOADER_CONFIGS=${TMPMNT}/boot/loader.conf
         if [ -f ${TMPMNT}/boot/loader.conf.local ]
         then
           LOADER_CONFIGS="${LOADER_CONFIGS} ${TMPMNT}/boot/loader.conf.local"
           fi
-        sed -i '' -E s/"^vfs.root.mountfrom=.*$"/"vfs.root.mountfrom=\"zfs:${POOL}\/ROOT\/${2##*/}\""/g ${LOADER_CONFIGS} 2> /dev/null
+        + sed -i '' -E s/"^vfs.root.mountfrom=.*$"/"vfs.root.mountfrom=\"zfs:${POOL}\/ROOT\/${2##*/}\""/g ${LOADER_CONFIGS} 2> /dev/null
         if [ ${MOUNT} -eq 0 ]
         then
-          zfs umount ${POOL}/ROOT/${2}
-          zfs set mountpoint=legacy ${POOL}/ROOT/${2}
+          + zfs umount ${POOL}/ROOT/${2}
+          + zfs set mountpoint=legacy ${POOL}/ROOT/${2}
         fi
       fi
-      if ! zpool set bootfs=${POOL}/ROOT/${2} ${POOL}
+      if ! + zpool set bootfs=${POOL}/ROOT/${2} ${POOL}
       then
         echo "ERROR: Failed to activate '${POOL}/ROOT/${2}'"
         exit 1
@@ -261,16 +279,16 @@ EOF
       | grep -v "${POOL}/ROOT/${2}" \
       | while read I
         do
-          zfs set canmount=noauto ${I}
+          + zfs set canmount=noauto ${I}
         done
     # Enable mounting for the active BE and promote it
     zfs list -H -o name,origin -t filesystem -r ${POOL}/ROOT/${2} \
       | while read I ORIGIN
         do
-          zfs set canmount=on ${I} 2> /dev/null
+          + zfs set canmount=on ${I}
           if [ ${ORIGIN} != "-" ]
           then
-            zfs promote ${I}
+            + zfs promote ${I}
           fi
         done
     echo "Activated successfully"
@@ -294,21 +312,21 @@ EOF
       (Y|y|[Yy][Ee][Ss])
         if __be_snapshot ${POOL}/ROOT/${2}
         then
-          if ! zfs destroy -r ${POOL}/ROOT/${2} 1> /dev/null 2> /dev/null
+          if ! + zfs destroy -r ${POOL}/ROOT/${2} 1> /dev/null 2> /dev/null
           then
             echo "ERROR: Snapshot '${2}' is origin for other boot environment(s)"
             exit 1
           fi
         else
           ORIGINS=$( zfs list -r -H -o origin ${POOL}/ROOT/${2} )
-          if ! zfs destroy ${POOL}/ROOT/${2} 1> /dev/null 2> /dev/null
+          if ! + zfs destroy ${POOL}/ROOT/${2} 1> /dev/null 2> /dev/null
           then
-            zfs destroy -r ${POOL}/ROOT/${2} 2>&1 \
+            + zfs destroy -r ${POOL}/ROOT/${2} 2>&1 \
               | grep "${POOL}/ROOT/" \
               | grep -v "@" \
               | while read I
                 do
-                  zfs promote ${I} 2> /dev/null
+                  + zfs promote ${I} 2> /dev/null
                 done
           fi
           if ! [ "${ORIGINS}" = "-" ]
@@ -316,7 +334,7 @@ EOF
             echo "${ORIGINS}" \
               | while read I
                 do
-                  zfs destroy -r ${I} 2> /dev/null
+                  + zfs destroy -r ${I} 2> /dev/null
                 done
           fi
         fi
@@ -344,7 +362,7 @@ EOF
       echo "ERROR: Boot environment '${3}' already exists"
       exit 1
     fi
-    zfs rename ${POOL}/ROOT/${2} ${POOL}/ROOT/${3}
+    + zfs rename ${POOL}/ROOT/${2} ${POOL}/ROOT/${3}
     echo "Renamed successfully"
     ;;
 
