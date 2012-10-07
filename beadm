@@ -250,7 +250,12 @@ case ${1} in
         then
           LOADER_CONFIGS="${LOADER_CONFIGS} ${TMPMNT}/boot/loader.conf.local"
         fi
-        + sed -i '' -E s/"^vfs.root.mountfrom=.*$"/"vfs.root.mountfrom=\"zfs:${POOL}\/ROOT\/${2##*/}\""/g ${LOADER_CONFIGS} 2> /dev/null
+        + sed -i~ -E '/^vfs\.root\.mountfrom/s!=.*!="zfs:'${NEWROOT}'"!' \
+            ${LOADER_CONFIGS}
+        for l in ${LOADER_CONFIGS}
+        do
+            + rm -f ${l}~
+        done
 
         + umount ${TMPMNT}
         rmdir ${TMPMNT}
