@@ -274,22 +274,19 @@ case ${1} in
         exit 1
       fi
     fi
-    # Disable mounting on all inactive datasets
-    zfs list -H -o name -r ${POOL}/ROOT \
-      | grep -v "${NEWROOT}" \
-      | while read I
+    # Disable mounting on the old BE
+    zfs list -H -o name,canmount -r ${ROOTFS} \
+      | while read I CAN
         do
-          doit zfs set canmount=noauto ${I}
+          [ $CAN = on ] && doit zfs set canmount=noauto ${I}
         done
     # Enable mounting for the active BE and promote it
-    zfs list -H -o name,origin -t filesystem -r ${NEWROOT} \
-      | while read I ORIGIN
+    zfs list -H -o name,origin,canmount -t filesystem -r ${NEWROOT} \
+      | while read I ORIGIN CAN
         do
-          doit zfs set canmount=on ${I}
-          if [ ${ORIGIN} != "-" ]
-          then
-            doit zfs promote ${I}
-          fi
+          [ ${ORIGIN} != "-" ]  && doit zfs promote ${I}
+          [ $I = ${NEWROOT} ]   && continue
+          [ $CAN = noauto ]     && doit zfs set canmount=on ${I}
         done
     echo "Activated successfully"
     ;;
