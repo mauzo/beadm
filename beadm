@@ -495,7 +495,12 @@ EOF
         else
           TMPMNT=${MOUNT}
         fi
-        cp /boot/zfs/zpool.cache ${TMPMNT}/boot/zfs/zpool.cache
+        if [ -f /boot/zfs/zpool.cache ]
+        then
+          cp /boot/zfs/zpool.cache ${TMPMNT}/boot/zfs/zpool.cache
+        else
+          rm -f ${TMPMNT}/boot/zfs/zpool.cache
+        fi
         LOADER_CONFIGS=${TMPMNT}/boot/loader.conf
         if [ -f ${TMPMNT}/boot/loader.conf.local ]
         then
@@ -505,7 +510,7 @@ EOF
         if [ ${MOUNT} -eq 0 ]
         then
           zfs umount ${POOL}/${BEDS}/${2}
-          zfs set mountpoint=legacy ${POOL}/${BEDS}/${2}
+          zfs set mountpoint=/ ${POOL}/${BEDS}/${2}
         fi
       fi
       if ! zpool set bootfs=${POOL}/${BEDS}/${2} ${POOL} 1> /dev/null 2> /dev/null
@@ -518,6 +523,7 @@ EOF
     ZFS_LIST=$( zfs list -H -o name -r ${POOL}/${BEDS} )
     # disable automatic mount on all inactive boot environments
     echo "${ZFS_LIST}" \
+      | grep -v "^${POOL}/${BEDS}$" \
       | grep -v "^${POOL}/${BEDS}/${2}$" \
       | grep -v "^${POOL}/${BEDS}/${2}/" \
       | while read NAME
@@ -715,7 +721,6 @@ EOF
       echo "ERROR: Cannot mount '${2}' at '${TARGET}' mountpoint"
       exit 1
     fi
-    PREFIX=$( echo ${POOL}/${BEDS}/${2}/ | sed 's/\//\\/g' )
     zfs list -H -o name,mountpoint -r ${POOL}/${BEDS}/${2} \
       | grep -v -E "[[:space:]](legacy|none)$" \
       | sort -n \
@@ -732,7 +737,7 @@ EOF
                   continue
                   ;;
                 (*)
-                  MOUNTPOINT="/$( echo "${FS}" | sed s/"${PREFIX}"//g )"
+                  MOUNTPOINT="/$( echo "${FS}" | sed s^"${POOL}/${BEDS}/${2}/"g )"
                   ;;
               esac
             fi
