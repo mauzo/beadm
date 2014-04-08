@@ -15,7 +15,7 @@
 .\"     @(#)beadm.1
 .\" $FreeBSD$
 .\"
-.Dd April 26, 2012
+.Dd September 4, 2012
 .Dt BEADM 1
 .Os FreeBSD
 .Sh NAME
@@ -27,23 +27,33 @@ activate
 .Ao Ar beName Ac
 .Nm
 create
-.Op Fl e Ar nonActiveBe | Ar beName@snapshot
+.Op Fl e Ar nonActiveBe | Fl e Ar beName@snapshot
 .Ao Ar beName Ac
 .Nm
 create
 .Ao Ar beName@snapshot Ac
 .Nm
 destroy
-.Ao Ar beName Ac
-.Nm
-destroy
-.Ao Ar beName@snapshot Ac
+.Op Fl F
+.Ao Ar beName | beName@snapshot Ac
 .Nm
 list
+.Op Fl a
+.Op Fl D
+.Op Fl H
+.Op Fl s
+.Nm
+mount
+.Ao Ar beName Ac
+.Op mountpoint
 .Nm
 rename
 .Ao Ar origBeName Ac
 .Ao Ar newBeName Ac
+.Nm
+{ umount | unmount }
+.Op Fl f
+.Ao Ar beName Ac
 .Sh DESCRIPTION
 The
 .Nm
@@ -63,7 +73,7 @@ Activate the given
 for the next boot.
 .Pp
 .It Ic create
-.Op Fl e Ar nonActiveBe | Ar beName@snapshot
+.Op Fl e Ar nonActiveBe | Fl e Ar beName@snapshot
 .Ao Ar beName Ac
 .Pp
 Creates a new boot environment named
@@ -77,20 +87,49 @@ If the -e param is specified, the new environment will be cloned from the given
 Creates a snapshot of the existing boot environment named
 .Ar beName .
 .Pp
-.It Ic destroy Ao Ar beName Ac
+.It
+.Ic destroy Op Fl F
+.Ao Ar beName | beName@snapshot Ac
 .Pp
 Destroys the given
 .Ar beName
-boot environment.
-.It Ic destroy Ao Ar beName@snapshot Ac
-.Pp
-Destroys the given
+boot environment or
 .Ar beName@snapshot
 snapshot.
+Specifying
+.Fl F
+will automatically unmount without confirmation.
 .Pp
 .It Ic list
+.Op Fl a
+.Op Fl D
+.Op Fl H
+.Op Fl s
 .Pp
 Displays all boot environments.
+The Active field indicates whether the boot environment is active now (N); active on reboot (R); or both (NR).
+.PP
+If
+.Fl a
+is used, display all datasets.
+If
+.Fl D
+is used, display the full space usage for each boot environment, assuming all other boot environments were destroyed.
+The
+.Fl H
+option is used for scripting. It does not print headers and separate fields by a single tab instead of arbitrary white space.
+If
+.Fl s
+is used, display all snapshots as well.
+.Pp
+.It Ic mount
+.Ao Ar beName Ac
+.Op mountpoint
+.Pp
+Temporarily mount the boot environment.
+Mount at the specified
+.Ar mountpoint
+if provided.
 .Pp
 .It Ic rename Ao Ar origBeName Ac Ao Ar newBeName Ac
 .Pp
@@ -98,6 +137,15 @@ Renames the given nonactive
 .Ar origBeName
 to the given
 .Ar newBeName
+.Pp
+.It Ic umount
+.Op Fl f
+.Ao Ar beName Ac
+.Pp
+Unmount the given boot environment, if it is mounted.
+Specifying
+.Fl f
+will force the unmount if busy.
 .Pp
 .El
 .Sh EXAMPLES
@@ -107,14 +155,14 @@ Perform a system upgrade in a
 .Xr jail 8
 .Pp
 Create a new boot environment called
-.Em jailed
+.Em jailed :
 .Pp
 .Dl beadm create -e default jailed
 .Pp
 Set mountpoint for new jail to
-.Pa /usr/jails/jailed
+.Pa /usr/jails/jailed :
 .Pp
-.Dl zfs set mountpoint=/usr/jails/jailed zroot/ROOT/jailed
+.Dl beadm mount jailed /usr/jails/jailed
 .Pp
 The currently active boot environment is now replicated into the jailed system and ready for upgrade.
 Startup the jail, login and perform the normal upgrade process.
@@ -144,6 +192,23 @@ A HOWTO guide is posted at the FreeBSD forums:
 .Xr beadm 1M
 originally appeared in Solaris.
 .Sh AUTHORS
-.An Slawomir Wojciech Wojtczak (vermaden) Aq vermaden@interia.pl
-.An Bryan Drewery Aq bryan@shatow.net
-wrote this manual page and contributed child dataset fixes
+.Bl -bullet
+.It
+Slawomir Wojciech Wojtczak (vermaden)
+.Ar vermaden@interia.pl
+.Pp
+Creator and maintainer of
+.Nm .
+.It
+Bryan Drewery (bdrewery)
+.Ar bryan@shatow.net
+.Pp
+Wrote this manual page and contributed child dataset fixes.
+.It
+Mike Clarke (rawthey)
+.Ar jmc-fbsd@milibyte.co.uk
+.Pp
+Wrote fast implementation of
+.Nm Ar list .
+.Pp
+Contributed a lot of fixes and usability changes.
