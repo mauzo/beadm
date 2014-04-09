@@ -98,24 +98,27 @@ __be_new() { # 1=SOURCE 2=TARGET
   zfs list -H -o name -r ${SOURCE} \
     | while read FS
       do
-        local OPTS=""
+        local OPTS="-o canmount=off"
         while read NAME PROPERTY VALUE
         do
-          local OPTS="-o ${PROPERTY}=${VALUE} ${OPTS}"
+          [ -z "$PROPERTY" ] && continue
+          [ "$PROPERTY" = "canmount" ] && continue
+          OPTS="-o ${PROPERTY}=${VALUE} ${OPTS}"
         done << EOF
-$( zfs get -o name,property,value -s local -H all ${FS} | grep -v -E "(canmount)" )
+$( zfs get -o name,property,value -s local -H all "${FS}" )
 EOF
         DATASET=$( echo ${FS} | awk '{print $1}' | sed -E s/"^${POOL}\/ROOT\/${SOURCE##*/}"/"${POOL}\/ROOT\/${2##*/}"/g )
-        if [ "${OPTS}" = "-o = " ]
-        then
-          local OPTS=""
-        fi
         if  __be_snapshot ${1}
         then
-          doit zfs clone -o canmount=off ${OPTS} ${FS}@${1##*@} ${DATASET}
+          doit zfs clone ${OPTS} ${FS}@${1##*@} ${DATASET}
         else
-          doit zfs clone -o canmount=off ${OPTS} ${FS}@${2##*/} ${DATASET}
+          doit zfs clone ${OPTS} ${FS}@${2##*/} ${DATASET}
         fi
+        # Cloning with canmount set to any value other than 'off' will
+        # automount the filesystem, which would be Very Bad. So if we
+        # want it to be 'noauto' we need to reset it now.
+        local CANMOUNT="$(zfs get -Ho value canmount "$FS")"
+        [ "$CANMOUNT" != "off" ] && doit zfs set canmount=noauto ${DATASET}
       done
   echo "Created successfully"
 }
