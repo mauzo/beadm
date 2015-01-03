@@ -499,17 +499,42 @@ case ${1} in
         doit mount -t zfs "${NEWROOT}" "${TMPMNT}"
         doit cp /boot/zfs/zpool.cache ${TMPMNT}/boot/zfs/zpool.cache # 2> /dev/null
 
-        LOADER_CONFIGS=${TMPMNT}/boot/loader.conf
-        if [ -f ${TMPMNT}/boot/loader.conf.local ]
-        then
-          LOADER_CONFIGS="${LOADER_CONFIGS} ${TMPMNT}/boot/loader.conf.local"
-        fi
-        doit sed -i~ -E '/^vfs\.root\.mountfrom/s!=.*!="zfs:'${NEWROOT}'"!' \
-            ${LOADER_CONFIGS}
-        for l in ${LOADER_CONFIGS}
+        LOADER_CONFIGS=""
+        for c in loader.conf loader.conf.local
         do
-            doit rm -f ${l}~
+            c="${TMPMNT}/boot/$c"
+            [ -f "$c" ] && LOADER_CONFIGS="${LOADER_CONFIGS} ${c}"
         done
+        vrm_line="$(cat <<VRM)"
+vfs.root.mountfrom="zfs:${NEWROOT}"
+VRM
+        if [ -n "${LOADER_CONFIGS}" ]
+        then
+            doit sed -i~ -E "$(cat <<SED)" ${LOADER_CONFIGS}
+                /^vfs\.root\.mountfrom/ {
+                    c \ 
+                    ${vrm_line}
+                    q
+                }
+                $ { p
+                    c \ 
+                    ${vrm_line}
+                }
+SED
+            for l in ${LOADER_CONFIGS}
+            do
+                doit rm -f ${l}~
+            done
+        else
+            if [ "$DOIT" = "YES" ]
+            then
+                echo "${vrm_line}" >"${TMPMNT}/boot/loader.conf"
+            else
+                cat <<CAT >&3
++ echo '${vrm_line}' >${TMPMNT}/boot/loader.conf
+CAT
+            fi
+        fi
 
         doit umount ${TMPMNT}
         rmdir ${TMPMNT}
