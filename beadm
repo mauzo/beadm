@@ -553,20 +553,7 @@ CAT
         exit 1
       fi
     fi
-    # Disable mounting on the old BE
-    zfs list -H -o name,canmount -r ${ROOTFS} \
-      | while read I CAN
-        do
-          [ $CAN = on ] && doit zfs set canmount=noauto ${I}
-        done
-    # Enable mounting for the active BE and promote it
-    zfs list -H -o name,origin,canmount -t filesystem -r ${NEWROOT} \
-      | while read I ORIGIN CAN
-        do
-          [ ${ORIGIN} != "-" ]  && doit zfs promote ${I}
-          [ $I = ${NEWROOT} ]   && continue
-          [ $CAN = noauto ]     && doit zfs set canmount=on ${I}
-        done
+    # The rest of the activation happens after reboot, in rc.d/zfs_be.
     echo "Activated successfully"
     ;;
 

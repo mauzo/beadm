@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# PROVIDE: beadm
+# REQUIRE: mountcritlocal
+# BEFORE: zfs
+
+. /etc/rc.subr
+
+name="zfs_be"
+rcvar="zfs_be_enable"
+start_cmd="zfs_be_start"
+stop_cmd=":"
+required_modules="zfs"
+
+: ${zfs_be_root:=ROOT}
+
+zfs_be_start () {
+    newbe="$(zfs list -Ho name /)"
+    [ -z "$newbe" ] && return
+
+    echo -n "Activating ZFS BE ${newbe}:"
+
+    beroot="${newbe%%/*}/${zfs_be_root}"
+
+    # Hmm. This assumes BE fs names don't have spaces in...
+    zfs list -Ho name,origin,canmount -rt filesystem "$beroot" \
+    | while read fs origin can
+    do
+        if [ "${fs#$newbe}" = "$fs" ]
+        then
+            # not part of the new BE
+            [ $can = on ] && zfs set canmount=noauto "$fs"
+        else
+            # part of the new BE: promote, set mountable, but not the
+            # root nor fsen with canmount=off
+            [ $origin = "-" ]       || zfs promote "$fs"
+            [ "$fs" = "$newbe" ]    && continue
+            [ $can = noauto ]       && zfs set canmount=on "$fs"
+        fi
+    done
+
+    echo "."
+}
+
+load_rc_config $name
+run_rc_command "$1"
