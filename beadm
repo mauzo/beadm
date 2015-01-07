@@ -27,794 +27,925 @@
 
 unset LC_ALL
 unset LANG
-PATH=${PATH}:/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/usr/local/sbin
+PATH=/bin:/sbin:/rescue
 
 VERBOSE="NO"
 DOIT="YES"
 
-if [ $( uname -r | cut -d '-' -f1 | cut -d '.' -f1 ) -lt 8 ]
-then
-  echo "ERROR: beadm works on FreeBSD 8.0 or later"
-  exit 1
-fi
-
-if [ "${1}" = "--version" -o "${1}" = "version" ]
-then
-  echo "beadm 1.0 2013/10/13"
-  exit 0
-fi
-
-__usage() {
-  local NAME=${0##*/}
-  echo "usage:"
-  echo "  ${NAME} activate <beName>"
-  echo "  ${NAME} create [-e nonActiveBe | -e beName@snapshot] <beName>"
-  echo "  ${NAME} create <beName@snapshot>"
-  echo "  ${NAME} destroy [-F] <beName | beName@snapshot>"
-  echo "  ${NAME} list [-a] [-s] [-D] [-H]"
-  echo "  ${NAME} rename <origBeName> <newBeName>"
-  echo "  ${NAME} mount <beName> [mountpoint]"
-  echo "  ${NAME} { umount | unmount } [-f] <beName>"
-  exit 1
+usage() {
+    local NAME=${0##*/}
+    echo "usage:"
+    echo "  ${NAME} activate <beName>"
+    echo "  ${NAME} create [-e nonActiveBe | -e beName@snapshot] <beName>"
+    echo "  ${NAME} create <beName@snapshot>"
+    echo "  ${NAME} destroy [-F] <beName | beName@snapshot>"
+    echo "  ${NAME} list [-a] [-s] [-D] [-H]"
+    echo "  ${NAME} rename <origBeName> <newBeName>"
+    echo "  ${NAME} mount <beName> [mountpoint]"
+    echo "  ${NAME} { umount | unmount } [-f] <beName>"
+    exit 1
 }
+
+# Utilities
 
 exec 3>&2
 doit () {
-  [ $VERBOSE = "YES" ]  && echo "+ $@" >&3
-  [ $DOIT = "YES" ]     || return 0
-  "$@"
+    if [ $DOIT = YES ]
+    then
+        [ $VERBOSE = YES ]  && echo "+ $*" >&3
+        "$@"
+    else
+        [ $VERBOSE = YES ]  && echo "- $*" >&3
+        return 0
+    fi
+}
+
+warn () {
+    for l in "$@"
+    do
+        echo "$l" >&3
+    done
+}
+
+# It's stupidly hard to reliably get out of a shell script
+trap 'exit 1' USR1
+PARENT=$$
+die () {
+    for l in "$@"
+    do
+        echo "ERROR: $l" >&3
+    done
+    kill -USR1 $PARENT
+    exit 1
+}
+
+doopts () {
+    local opts="$1"
+    shift
+
+    local vars=
+    while [ "$1" != "--" ]
+    do
+        vars="$vars$1:"
+        shift
+    done
+    shift
+
+    if [ "$opts" != "-" ]
+    then
+        local opt= OPTIND= OPTARG=
+        while getopts "$opts" opt
+        do
+            [ "$opt" = "?" ] && return 1
+            if [ -n "$OPTARG" ]
+            then
+                setvar "opt_$opt" "$OPTARG"
+            else
+                setvar "opt_$opt" "-$opt"
+            fi
+        done
+        shift $((OPTIND - 1))
+    fi
+
+    local v=
+    local IFS=":"
+    for v in $vars
+    do
+        [ $# -gt 0 ] || return 1
+        setvar "$v" "$1"
+        shift
+    done
+}
+
+# some characters...
+HT="$(printf '\t')"
+NL="$(printf '\nX')"
+NL="${NL%X}"
+
+# read tab-separated output from zfs list/get -H
+t_read () {
+    local IFS="$HT"
+    read -r "$@"
+}
+
+# We don't have grep, so fake it. All use EREs.
+
+sgrep () { 
+    sed -nEe"/$1/p" 
+}
+vgrep () { 
+    sed -Ee"/$1/d" 
+}
+qgrep () {
+    [ -n "$(sed -nEe"/$1/{= q}")" ]
+}
+
+# Sometimes all you need is a string match.
+
+in_str () {
+    case "$1" in
+    *"$2"*)   return 0    ;;
+    esac
+    return 1
+}
+
+# Or a glob. 
+
+fnmatch () {
+    if [ -z "$1" ]
+    then
+        case "$2" in
+        "*"|"")   return 0    ;;
+        *)      return 1    ;;
+        esac
+    fi
+    [ -z "${1##$2}" ]
+}
+
+# Or a case expression.
+
+cmatch () {
+    case "$1" in
+    $2)   return 0    ;;
+    esac
+    return 1
+}
+
+confirm () {
+    local choice=
+
+    while [ $# -gt 1 ]
+    do
+        echo "$1"
+        shift
+    done
+    echo -n "$1"
+
+    read choice
+    cmatch "$choice" "[Yy]|[Yy][Ee][Ss]"
+}
+
+# mktemp(1) is in /usr/bin
+mkdtemp () {
+    local prefix="$1"
+
+    local rand="$(head -c8 /dev/random | sha1 | head -c8)"
+    local try="/tmp/$prefix.$rand"
+    local i=1
+
+    until [ $i -gt 5 ] || mkdir "$try" 2>/dev/null
+    do
+        i=$((i + 1))
+        rand="$(head -c8 /dev/random | sha1 | head -c8)"
+        try="/tmp/$prefix.$rand"
+    done
+
+    [ -d "$try" ] || die "Can't create temporary directory"
+    echo "$try"
 }
 
 # check if system has a grub.cfg file and update it
-__update_grub() {
-  if [ -e /boot/grub/grub.cfg ]
-  then
-    if doit grub-mkconfig -o /boot/grub/grub.cfg 1> /dev/null 2> /dev/null
+update_grub() {
+    if [ -e /boot/grub/grub.cfg ]
     then
-      echo "GRUB configuration updated successfully"
-    else
-      echo "WARNING: Failed to update GRUB configuration"
+        # XXX where does grub-mkconfig live?
+        if doit grub-mkconfig -o /boot/grub/grub.cfg
+        then
+            echo "GRUB configuration updated successfully"
+        else
+            echo "WARNING: Failed to update GRUB configuration"
+        fi
     fi
-  fi
 }
 
 # check if boot environment exists
-__be_exist() { # 1=DATASET
-  if ! zfs list -H -o name ${1} 1> /dev/null 2> /dev/null
-  then
-    echo "ERROR: Boot environment '${1##*/}' does not exist"
-    exit 1
-  fi
+zfs_exist() { # 1=DATASET
+    zfs list -H -o name "${1}" 1> /dev/null 2> /dev/null
+}
+
+assert_be_exist() {
+    if ! zfs_exist "$1" 
+    then
+        die "Boot environment '${1##*/}' does not exist"
+    fi
+}
+
+resolve_be () {
+    local opt_e= opt_s= be=
+    doopts "es" be -- "$@"
+
+    local at=
+    [ -n "$opt_s" ] && at="@"
+    fnmatch "$be" "*[!-${at}a-zA-Z0-9]*" &&
+        die "Bad BE name '$be'"
+
+    be="$BEROOT/$be"
+    [ -n "$opt_e" ] && assert_be_exist "$be"
+
+    echo "$be"
 }
 
 # check if argument is a snapshot
-__be_snapshot() { # 1=DATASET/SNAPSHOT
-  echo "${1}" | grep -q "@" 2> /dev/null
+zfs_snap() { # 1=DATASET/SNAPSHOT
+    zfs list -Ho name -t snapshot >/dev/null 2>/dev/null
+}
+
+zfs_get() {
+    zfs get -Ho value $1 "$2"
 }
 
 # check if boot environment is mounted
-__be_mounted() { # 1=BE
-  mount 2> /dev/null | grep -q -E "^${1} " 2> /dev/null
+zfs_mounted() { # 1=BE
+    [ $(zfs_get mounted "$1") = "yes" ]
+}
+
+# This returns the real current mountpoint, not the mountpoint property.
+zfs_mountpoint () {
+    local zfs="$1"
+    local fs= dir= fstype= rest=
+
+    # Unfortunately zfs(8) doesn't give us this information, so we have
+    # to go grovelling around in the output of mount(8).
+    mount -p | while read fs dir fstype rest
+    do
+        [ "$fstype" = zfs ] || continue
+        [ "$fs" = "$zfs" ]  || continue
+        echo "$dir"
+        return
+    done
 }
 
 # check if boot environment is a clone
-__be_clone() { # 1=DATASET
-  if zfs list ${1} 1> /dev/null 2> /dev/null
-  then
-    local ORIGIN="$( zfs list -H -o origin ${1} )"
-    if [ "${ORIGIN}" = "-" ]
+zfs_clone() { # 1=DATASET
+    if zfs_exist "$1"
     then
-      # boot environment is not a clone
-      return 1
+        if [ "$(zfs_get origin "$1")" = "-" ]
+        then
+            # boot environment is not a clone
+            return 1
+        else
+            # boot environment is a clone
+            return 0
+        fi
     else
-      # boot environment is a clone
-      return 0
+        # boot environment does not exist
+        return 2
     fi
-  else
-    # boot environment does not exist
-    return 2
-  fi
 }
 
-# create new boot environment
-__be_new() { # 1=SOURCE 2=TARGET
-  local SOURCE=$( echo ${1} | cut -d '@' -f 1 )
-  local FMT=$( date "+beadm-%Y%m%d%H%M%S" )
-  if __be_snapshot ${1}
-  then
-    # create boot environment from snapshot
-    local SNAPSHOT=$( echo ${1} | cut -d '@' -f 2 )
-    zfs list -r -H -t filesystem -o name ${SOURCE} \
-      | while read FS
+## BE FUNCTIONS
+
+# XXX A lot of this is wrong. It should be possible to use beadm to
+# initialize a BE on a system not yet configured for them.
+beadm_init () {
+    ROOTFS="$(zfs list -Ho name /)"
+    [ -n "$ROOTFS" ] || die "This system does not boot from ZFS pool"
+    fnmatch "$ROOTFS" "*/*/*" ||
+        die "This system is not configured for boot environments"
+
+    GRUB=NO
+    BEDS=ROOT # XXX I'd like to get rid of this...
+    [ -f /usr/local/etc/beadm.conf ] && . /usr/local/etc/beadm.conf
+
+    POOL="${ROOTFS%%/*}"
+    BEROOT="$POOL/$BEDS"
+    BOOTFS="$(zpool list -H -o bootfs "${POOL}")"
+
+    if [ -z "${BOOTFS}" -o "${BOOTFS}" = "-" ]
+    then
+        die "ZFS boot pool '${POOL}' has unset 'bootfs' property"
+    fi
+}
+
+beadm_new() {
+    local source="$1"
+    local dest="$2"
+    local snap=
+
+    if in_str "$source" "@"
+    then
+        # create boot environment from snapshot
+        local sn="${source##*@}"
+        snap="$source"
+        source="${source%@*}"
+
+        zfs list -r -H -t filesystem -o name "$source" \
+        | while t_read fs
         do
-          if ! zfs list -H -o name ${FS}@${SNAPSHOT} 1> /dev/null 2> /dev/null
-          then
-            echo "ERROR: Child snapshot '${FS}@${SNAPSHOT}' does not exist"
-            exit 1
-          fi
+            zfs_exist "$fs@$sn" ||
+                die "Child snapshot '$fs@$sn' does not exist"
         done
-  else
-    # create boot environment from other boot environment
-    if zfs list -H -o name ${1}@${FMT} 1> /dev/null 2> /dev/null
-    then
-      echo "ERROR: Snapshot '${1}@${FMT}' already exists"
-      exit 1
+    else
+        # create boot environment from other boot environment
+        local fmt=$(date "+beadm-%Y%m%d%H%M%S")
+        snap="$source@$fmt"
+
+        zfs_exist "$snap" && 
+            die "Snapshot '$snap' already exists"
+        doit zfs snapshot -r "$snap" ||
+            die "Cannot create snapshot '$snap'"
     fi
-    if ! doit zfs snapshot -r ${1}@${FMT} 1> /dev/null 2> /dev/null
-    then
-      echo "ERROR: Cannot create snapshot '${1}@${FMT}'"
-      exit 1
-    fi
-  fi
-  # clone properties of source boot environment
-  zfs list -H -o name -r ${SOURCE} \
-    | grep -v '@' \
-    | while read FS
-      do
-        local OPTS="-o canmount=off"
-        while read NAME PROPERTY VALUE
+
+    # clone properties of source boot environment
+    zfs list -Ho name -rt filesystem ${source} \
+    | while read fs
+    do
+        local opts="-o canmount=off"
+        # This can't be zfs | while, since the while ends up in a
+        # subshell and can't set opts
+        while t_read name property value
         do
-          [ -z "$PROPERTY" ] && continue
-          [ "$PROPERTY" = "canmount" ] && continue
-          OPTS="-o ${PROPERTY}=\"${VALUE}\" ${OPTS}"
-        done << EOF
-$( zfs get -o name,property,value -s local,received -H all "${FS}" )
-EOF
-        DATASET=$( echo ${FS} | awk '{print $1}' | sed -E s/"^${POOL}\/${BEDS}\/${SOURCE##*/}"/"${POOL}\/${BEDS}\/${2##*/}"/g )
-        if  __be_snapshot ${1}
-        then
-          eval "doit zfs clone ${OPTS} ${FS}@${1##*@} ${DATASET}"
-        else
-          eval "doit zfs clone ${OPTS} ${FS}@${FMT} ${DATASET}"
-        fi
+            [ -z "$property" ]              && continue
+            [ "$property" = "canmount" ]    && continue
+            opts="$opts -o $property=\"$value\""
+        done <<PROP
+        $(zfs get -Ho name,property,value -s local,received all "$fs")
+PROP
+
+        local clone="$dest${fs#$BEROOT}"
+        # sometimes I really hate shell...
+        eval "doit zfs clone $opts \"$snap\" \"$clone\""
+
         # Cloning with canmount set to any value other than 'off' will
         # automount the filesystem, which would be Very Bad. So if we
         # want it to be 'noauto' we need to reset it now.
-        local CANMOUNT="$(zfs get -Ho value canmount "$FS")"
-        [ "$CANMOUNT" != "off" ] && doit zfs set canmount=noauto ${DATASET}
-      done
-      # check if we need to update grub
-      if [ "${GRUB}" = YES ]
-      then
-        __update_grub
-      fi
+        local canmount="$(zfs_get canmount "$fs")"
+        [ "$canmount" != "off" ] && doit zfs set canmount=noauto "$clone"
+    done
+
+    # check if we need to update grub
+    if [ "${GRUB}" = YES ]
+    then
+        update_grub
+    fi
 }
 
-ROOTFS=$( mount | awk '/ \/ / {print $1}' )
+beadm_setup_root () {
+    local newroot="$1"
 
-if echo ${ROOTFS} | grep -q -m 1 -E "^/dev/"
-then
-  echo "ERROR: This system does not boot from ZFS pool"
-  exit 1
-fi
+    doit zfs set canmount=noauto $newroot
+    zfs_mounted $newroot && doit zfs umount $newroot
 
-POOL=$( echo ${ROOTFS} | awk -F '/' '{print $1}' )
+    local tmpmnt=$(mkdtemp beadm)
+    # Use mount(8) rather than zfs(8) since this is just a temporary
+    # mount. We've just set canmount=noauto and made sure the FS is
+    # unmounted, so this is safe.
+    doit mount -t zfs $newroot $tmpmnt
+    doit cp /boot/zfs/zpool.cache $tmpmnt/boot/zfs/zpool.cache
 
-if [ $( echo ${ROOTFS} | awk -F '/' '{print NF}' ) -lt 3 ]
-then
-  echo "ERROR: This system is not configured for boot environments"
-  exit 1
-fi
+    local loader_configs= l=
+    for l in loader.conf loader.conf.local
+    do
+            l="$tmpmnt/boot/$l"
+            [ -f "$l" ] && loader_configs="$loader_configs $l"
+    done
 
-BOOTFS=$( zpool list -H -o bootfs ${POOL} )
+    vrm_line="$(cat <<VRM)"
+vfs.root.mountfrom="zfs:$newroot"
+VRM
+    if [ -n "$loader_configs" ]
+    then
+        doit sed -i~ -E "$(cat <<SED)" $loader_configs
+            /^vfs\.root\.mountfrom=/ {
+                c \ 
+                ${vrm_line}
+                q
+            }
+            $ { p
+                c \ 
+                ${vrm_line}
+            }
+SED
+        for l in $loader_configs
+        do
+            doit rm -f ${l}~
+        done
+    else
+        if [ "$DOIT" = "YES" ]
+        then
+            echo "$vrm_line" >"$tmpmnt/boot/loader.conf"
+        else
+            cat <<CAT >&3
+- echo '$vrm_line' >$tmpmnt/boot/loader.conf
+CAT
+        fi
+    fi
 
-if [ -z "${BOOTFS}" -o "${BOOTFS}" = "-" ]
-then
- echo "ERROR: ZFS boot pool '${POOL}' has unset 'bootfs' property"
- exit 1
-fi
+    doit umount $tmpmnt
+    rmdir $tmpmnt
 
-if [ -f /usr/local/etc/beadm.conf ]
-then
-  . /usr/local/etc/beadm.conf
-fi
+    # The correct settings for a root fs are canmount=noauto,
+    # mountpoint=/. The old recommendation of mountpoint=legacy
+    # causes problems with subordinate fsen which expect to inherit
+    # their mountpoint, which is why Sun introduced the canmount
+    # property in the first place. Since the fs is currently
+    # unmounted, changing mountpoint will not cause zfs(1) to remount
+    # the fs over the current root.
+    doit zfs set mountpoint=/ $newroot
+}
 
-# update GRUB bootloader instead of FreeBSD's loader(8)
-: ${GRUB="NO"}
+## BEADM COMMANDS
 
-# use other prefix then the 'pool/ROOT/bename' default
-: ${BEDS="$( echo ${ROOTFS} | awk -F '/' '{print $2}' )"}
+beadm_list () {
+    [ -x /usr/bin/awk ] || die "beadm list needs /usr/bin/awk"
 
-while getopts "nv" opt
-do
-  case $opt in
-    (n) DOIT="NO"       ;;
-    (v) VERBOSE="YES"   ;;
-  esac
-done
-shift $(( $OPTIND - 1 ))
-
-case ${1} in
-
-  (list) # --------------------------------------------------------------------
     OPTION_a=0
     OPTION_D=0
     OPTION_s=0
-    shift
     while getopts "aDHs" OPT
     do
-      case ${OPT} in
-        (a) OPTION_a=1 ;;
-        (D) OPTION_D=1 ;;
-        (H) OPTION_H=1 ;;
-        (s) OPTION_s=1
-            OPTION_a=1 ;;
-        (*) __usage    ;;
-      esac
+        case ${OPT} in
+            (a) OPTION_a=1 ;;
+            (D) OPTION_D=1 ;;
+            (H) OPTION_H=1 ;;
+            (s) OPTION_s=1
+                    OPTION_a=1 ;;
+            (*) usage    ;;
+        esac
     done
-    awk -v POOL="${POOL}" \
-        -v BEDS="${BEDS}" \
-        -v ROOTFS="${ROOTFS}" \
-        -v BOOTFS="${BOOTFS}" \
-        -v OPTION_a="${OPTION_a}" \
-        -v OPTION_D="${OPTION_D}" \
-        -v OPTION_H="${OPTION_H}" \
-        -v OPTION_s="${OPTION_s}" \
-     'function __normalize(VALUE) {
-        if(VALUE == "-" || VALUE == 0)
-          return 0
-        else
-          return substr(VALUE, 1, length(VALUE) - 1) * MULTIPLIER[substr(VALUE, length(VALUE))]
-      }
-      function __show_units(VALUE) {
-             if(VALUE < 1024)                {                               UNIT = "K"; }
-        else if(VALUE < 1048576)             { VALUE /= 1024;                UNIT = "M"; }
-        else if(VALUE < 1073741824)          { VALUE /= 1048576;             UNIT = "G"; }
-        else if(VALUE < 1099511627776)       { VALUE /= 1073741824;          UNIT = "T"; }
-        else if(VALUE < 1125899906842624)    { VALUE /= 1099511627776;       UNIT = "P"; }
-        else if(VALUE < 1152921504606846976) { VALUE /= 1125899906842624;    UNIT = "E"; }
-        else                                 { VALUE /= 1152921504606846976; UNIT = "Z"; }
-        return sprintf("%.1f%s", VALUE, UNIT)
-      }
-      function __get_bename(BENAME) {
-        sub(BENAME_BEGINS_WITH "\/", "", BENAME)
-        sub("/.*", "", BENAME)
-        return BENAME
-      }
-      function __convert_date(DATE) {
-        CMD_DATE = "date -j -f \"%a %b %d %H:%M %Y\" \"" DATE "\" +\"%Y-%m-%d %H:%M\""
-        CMD_DATE | getline NEW
-        close(CMD_DATE)
-        return NEW
-      }
-      BEGIN {
-        BENAME_BEGINS_WITH = POOL "/" BEDS
-        MULTIPLIER["K"] = 1
-        MULTIPLIER["M"] = 1024
-        MULTIPLIER["G"] = 1048576
-        MULTIPLIER["T"] = 1073741824
-        MULTIPLIER["P"] = 1099511627776
-        MULTIPLIER["E"] = 1125899906842624
-        MULTIPLIER["Z"] = 1152921504606846976
-        MOUNTPOINT_LENGTH = 10
-        FSNAME_LENGTH = 2
-        if(OPTION_a == 1)
-          FSNAME_LENGTH = 19
-        CMD_MOUNT="mount"
-        while(CMD_MOUNT | getline)
-          if($1 ~ "^" BENAME_BEGINS_WITH)
-            MOUNTS[$1] = $3
-        close(CMD_MOUNT)
-        FS = "\\t"
-        CMD_ZFS_LIST = "zfs list -H -t all -s creation -o name,used,usedds,usedbysnapshots,usedrefreserv,refer,creation,origin -r "
-        while(CMD_ZFS_LIST BENAME_BEGINS_WITH | getline) {
-          if($1 != BENAME_BEGINS_WITH) {
-            FSNAME = $1
-            FSNAMES[length(FSNAMES) + 1] = FSNAME
-            USED              = __normalize($2)
-            USEDBYDATASET     = __normalize($3)
-            USEDBYSNAPSHOTS   = __normalize($4)
-            USEDREFRESERV     = __normalize($5)
-            REFER[FSNAME]     = __normalize($6)
-            CREATIONS[FSNAME] = $7
-            ORIGINS[FSNAME]   = $8
-            if(FSNAME ~ /@/)
-              SPACES[FSNAME] = USED
-            else {
-              SPACES[FSNAME] = USEDBYDATASET + USEDREFRESERV
-              if(OPTION_D != 1)
-                SPACES[FSNAME] += USEDBYSNAPSHOTS
-              BE = " " __get_bename(FSNAME) " "
-              if(index(BELIST, BE) == 0)
-                BELIST = BELIST " " BE
-              MOUNTPOINT = MOUNTS[FSNAME]
-              if(MOUNTPOINT) {
-                if((OPTION_a == 0 && FSNAME == (BENAME_BEGINS_WITH "/" __get_bename(FSNAME))) || (OPTION_a == 1)) {
-                  LM = length(MOUNTPOINT)
-                  if(LM > MOUNTPOINT_LENGTH)
-                    MOUNTPOINT_LENGTH = LM
-                }
-              }
-              else
-                MOUNTPOINT = "-"
-            }
+    /usr/bin/awk -v POOL="${POOL}" \
+            -v BEDS="${BEDS}" \
+            -v ROOTFS="${ROOTFS}" \
+            -v BOOTFS="${BOOTFS}" \
+            -v OPTION_a="${OPTION_a}" \
+            -v OPTION_D="${OPTION_D}" \
+            -v OPTION_H="${OPTION_H}" \
+            -v OPTION_s="${OPTION_s}" \
+      'function __normalize(VALUE) {
+            if(VALUE == "-" || VALUE == 0)
+                return 0
+            else
+                return substr(VALUE, 1, length(VALUE) - 1) * MULTIPLIER[substr(VALUE, length(VALUE))]
+        }
+        function __show_units(VALUE) {
+                      if(VALUE < 1024)                {                               UNIT = "K"; }
+            else if(VALUE < 1048576)             { VALUE /= 1024;                UNIT = "M"; }
+            else if(VALUE < 1073741824)          { VALUE /= 1048576;             UNIT = "G"; }
+            else if(VALUE < 1099511627776)       { VALUE /= 1073741824;          UNIT = "T"; }
+            else if(VALUE < 1125899906842624)    { VALUE /= 1099511627776;       UNIT = "P"; }
+            else if(VALUE < 1152921504606846976) { VALUE /= 1125899906842624;    UNIT = "E"; }
+            else                                 { VALUE /= 1152921504606846976; UNIT = "Z"; }
+            return sprintf("%.1f%s", VALUE, UNIT)
+        }
+        function __get_bename(BENAME) {
+            sub(BENAME_BEGINS_WITH "\/", "", BENAME)
+            sub("/.*", "", BENAME)
+            return BENAME
+        }
+        function __convert_date(DATE) {
+            CMD_DATE = "date -j -f \"%a %b %d %H:%M %Y\" \"" DATE "\" +\"%Y-%m-%d %H:%M\""
+            CMD_DATE | getline NEW
+            close(CMD_DATE)
+            return NEW
+        }
+        BEGIN {
+            BENAME_BEGINS_WITH = POOL "/" BEDS
+            MULTIPLIER["K"] = 1
+            MULTIPLIER["M"] = 1024
+            MULTIPLIER["G"] = 1048576
+            MULTIPLIER["T"] = 1073741824
+            MULTIPLIER["P"] = 1099511627776
+            MULTIPLIER["E"] = 1125899906842624
+            MULTIPLIER["Z"] = 1152921504606846976
+            MOUNTPOINT_LENGTH = 10
+            FSNAME_LENGTH = 2
             if(OPTION_a == 1)
-              LF = length(FSNAME)
-            else if(FSNAME !~ /@/)
-              LF = length(__get_bename(FSNAME))
-            if(LF > FSNAME_LENGTH)
-              FSNAME_LENGTH = LF
-          }
-        }
-        close(CMD_ZFS_LIST)
-        split(BELIST, BENAMES, " ")
-        if(OPTION_a == 1) {
-          BE_HEAD = "BE/Dataset/Snapshot"
-          printf "%-" FSNAME_LENGTH + 2 "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", BE_HEAD, "Active", "Mountpoint", "Space", "Created"
-        }
-        else if(OPTION_H == 1)
-          BE_HEAD = ""
-        else {
-          BE_HEAD = "BE"
-          printf "%-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", BE_HEAD, "Active", "Mountpoint", "Space", "Created"
-        }
-        if(OPTION_s != 1)
-          SNAPSHOT_FILTER = "(/[^@]*)?$"
-        for(I = 1; I <= length(BENAMES); I++) {
-          BENAME = BENAMES[I]
-          if(OPTION_a == 1) {
-            printf "\n"
-            print BENAME
-            for(J = 1; J <= length(FSNAMES); J++) {
-              FSNAME = FSNAMES[J]
-              if(FSNAME ~ "^" BENAME_BEGINS_WITH "/" BENAME SNAPSHOT_FILTER) {
-                ACTIVE = ""
-                if(FSNAME == ROOTFS)
-                  ACTIVE = ACTIVE "N"
-                if(FSNAME == BOOTFS)
-                  ACTIVE = ACTIVE "R"
-                if(! ACTIVE)
-                  ACTIVE = "-"
-                MOUNTPOINT = MOUNTS[FSNAME]
-                if(! MOUNTPOINT)
-                  MOUNTPOINT = "-"
-                printf "  %-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", FSNAME, ACTIVE, MOUNTPOINT, __show_units(SPACES[FSNAME]), __convert_date(CREATIONS[FSNAME])
-                ORIGIN = ORIGINS[FSNAME]
-                ORIGIN_DISPLAY = ORIGIN
-                sub(BENAME_BEGINS_WITH "/", "", ORIGIN_DISPLAY)
-                if(ORIGIN != "-") {
-                  if(OPTION_D == 1)
-                    SPACE = REFER[ORIGIN]
-                  else
-                    SPACE = SPACES[ORIGIN]
-                  printf  "  %-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", "  " ORIGIN_DISPLAY, "-", "-", __show_units(SPACE), __convert_date(CREATIONS[ORIGIN])
+                FSNAME_LENGTH = 19
+            CMD_MOUNT="mount"
+            while(CMD_MOUNT | getline)
+                if($1 ~ "^" BENAME_BEGINS_WITH)
+                    MOUNTS[$1] = $3
+            close(CMD_MOUNT)
+            FS = "\\t"
+            CMD_ZFS_LIST = "zfs list -H -t all -s creation -o name,used,usedds,usedbysnapshots,usedrefreserv,refer,creation,origin -r "
+            while(CMD_ZFS_LIST BENAME_BEGINS_WITH | getline) {
+                if($1 != BENAME_BEGINS_WITH) {
+                    FSNAME = $1
+                    FSNAMES[length(FSNAMES) + 1] = FSNAME
+                    USED              = __normalize($2)
+                    USEDBYDATASET     = __normalize($3)
+                    USEDBYSNAPSHOTS   = __normalize($4)
+                    USEDREFRESERV     = __normalize($5)
+                    REFER[FSNAME]     = __normalize($6)
+                    CREATIONS[FSNAME] = $7
+                    ORIGINS[FSNAME]   = $8
+                    if(FSNAME ~ /@/)
+                        SPACES[FSNAME] = USED
+                    else {
+                        SPACES[FSNAME] = USEDBYDATASET + USEDREFRESERV
+                        if(OPTION_D != 1)
+                            SPACES[FSNAME] += USEDBYSNAPSHOTS
+                        BE = " " __get_bename(FSNAME) " "
+                        if(index(BELIST, BE) == 0)
+                            BELIST = BELIST " " BE
+                        MOUNTPOINT = MOUNTS[FSNAME]
+                        if(MOUNTPOINT) {
+                            if((OPTION_a == 0 && FSNAME == (BENAME_BEGINS_WITH "/" __get_bename(FSNAME))) || (OPTION_a == 1)) {
+                                LM = length(MOUNTPOINT)
+                                if(LM > MOUNTPOINT_LENGTH)
+                                    MOUNTPOINT_LENGTH = LM
+                            }
+                        }
+                        else
+                            MOUNTPOINT = "-"
+                    }
+                    if(OPTION_a == 1)
+                        LF = length(FSNAME)
+                    else if(FSNAME !~ /@/)
+                        LF = length(__get_bename(FSNAME))
+                    if(LF > FSNAME_LENGTH)
+                        FSNAME_LENGTH = LF
                 }
-              }
             }
-          }
-          else {
-            SPACE = 0
-            ACTIVE = ""
-            NAME = BENAME_BEGINS_WITH "/" BENAME
-            if(NAME == ROOTFS)
-              ACTIVE = ACTIVE "N"
-            if(NAME == BOOTFS)
-              ACTIVE = ACTIVE "R"
-            if(! ACTIVE)
-              ACTIVE = "-"
-            for(J = 1; J <= length(FSNAMES); J++) {
-              FSNAME = FSNAMES[J]
-              if(FSNAME ~ "^" BENAME_BEGINS_WITH "/" BENAME "(/[^@]*)?$") {
-                if((BENAME_BEGINS_WITH "/" BENAME) == FSNAME) {
-                  MOUNTPOINT = MOUNTS[FSNAME]
-                  if(! MOUNTPOINT)
-                    MOUNTPOINT = "-"
-                  CREATION = __convert_date(CREATIONS[FSNAME])
+            close(CMD_ZFS_LIST)
+            split(BELIST, BENAMES, " ")
+            if(OPTION_a == 1) {
+                BE_HEAD = "BE/Dataset/Snapshot"
+                printf "%-" FSNAME_LENGTH + 2 "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", BE_HEAD, "Active", "Mountpoint", "Space", "Created"
+            }
+            else if(OPTION_H == 1)
+                BE_HEAD = ""
+            else {
+                BE_HEAD = "BE"
+                printf "%-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", BE_HEAD, "Active", "Mountpoint", "Space", "Created"
+            }
+            if(OPTION_s != 1)
+                SNAPSHOT_FILTER = "(/[^@]*)?$"
+            for(I = 1; I <= length(BENAMES); I++) {
+                BENAME = BENAMES[I]
+                if(OPTION_a == 1) {
+                    printf "\n"
+                    print BENAME
+                    for(J = 1; J <= length(FSNAMES); J++) {
+                        FSNAME = FSNAMES[J]
+                        if(FSNAME ~ "^" BENAME_BEGINS_WITH "/" BENAME SNAPSHOT_FILTER) {
+                            ACTIVE = ""
+                            if(FSNAME == ROOTFS)
+                                ACTIVE = ACTIVE "N"
+                            if(FSNAME == BOOTFS)
+                                ACTIVE = ACTIVE "R"
+                            if(! ACTIVE)
+                                ACTIVE = "-"
+                            MOUNTPOINT = MOUNTS[FSNAME]
+                            if(! MOUNTPOINT)
+                                MOUNTPOINT = "-"
+                            printf "  %-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", FSNAME, ACTIVE, MOUNTPOINT, __show_units(SPACES[FSNAME]), __convert_date(CREATIONS[FSNAME])
+                            ORIGIN = ORIGINS[FSNAME]
+                            ORIGIN_DISPLAY = ORIGIN
+                            sub(BENAME_BEGINS_WITH "/", "", ORIGIN_DISPLAY)
+                            if(ORIGIN != "-") {
+                                if(OPTION_D == 1)
+                                    SPACE = REFER[ORIGIN]
+                                else
+                                    SPACE = SPACES[ORIGIN]
+                                printf  "  %-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", "  " ORIGIN_DISPLAY, "-", "-", __show_units(SPACE), __convert_date(CREATIONS[ORIGIN])
+                            }
+                        }
+                    }
                 }
-                ORIGIN = ORIGINS[FSNAME]
-                if(ORIGIN == "-")
-                  SPACE += SPACES[FSNAME]
                 else {
-                  if(OPTION_D == 1)
-                    SPACE += REFER[FSNAME]
-                  else
-                    SPACE += SPACES[FSNAME] + SPACES[ORIGIN]
+                    SPACE = 0
+                    ACTIVE = ""
+                    NAME = BENAME_BEGINS_WITH "/" BENAME
+                    if(NAME == ROOTFS)
+                        ACTIVE = ACTIVE "N"
+                    if(NAME == BOOTFS)
+                        ACTIVE = ACTIVE "R"
+                    if(! ACTIVE)
+                        ACTIVE = "-"
+                    for(J = 1; J <= length(FSNAMES); J++) {
+                        FSNAME = FSNAMES[J]
+                        if(FSNAME ~ "^" BENAME_BEGINS_WITH "/" BENAME "(/[^@]*)?$") {
+                            if((BENAME_BEGINS_WITH "/" BENAME) == FSNAME) {
+                                MOUNTPOINT = MOUNTS[FSNAME]
+                                if(! MOUNTPOINT)
+                                    MOUNTPOINT = "-"
+                                CREATION = __convert_date(CREATIONS[FSNAME])
+                            }
+                            ORIGIN = ORIGINS[FSNAME]
+                            if(ORIGIN == "-")
+                                SPACE += SPACES[FSNAME]
+                            else {
+                                if(OPTION_D == 1)
+                                    SPACE += REFER[FSNAME]
+                                else
+                                    SPACE += SPACES[FSNAME] + SPACES[ORIGIN]
+                            }
+                        }
+                    }
+                    if(OPTION_H == 1)
+                        printf "%s\t%s\t%s\t%s\t%s\n", BENAME, ACTIVE, MOUNTPOINT, __show_units(SPACE), CREATION
+                    else
+                        printf "%-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", BENAME, ACTIVE, MOUNTPOINT, __show_units(SPACE), CREATION
                 }
-              }
             }
-            if(OPTION_H == 1)
-              printf "%s\t%s\t%s\t%s\t%s\n", BENAME, ACTIVE, MOUNTPOINT, __show_units(SPACE), CREATION
-            else
-              printf "%-" FSNAME_LENGTH "s %-6s %-" MOUNTPOINT_LENGTH "s %6s %s\n", BENAME, ACTIVE, MOUNTPOINT, __show_units(SPACE), CREATION
-          }
-        }
-      }'
-    ;;
+        }'
+}
 
-  (create) # ------------------------------------------------------------------
-    case ${#} in
-      (4)
-        if ! [ ${2} = "-e" ]
-        then
-          __usage
-        fi
-        # check if argument for -e option is full path dataset
-        # argument for -e option must be 'beName' or 'beName@snapshot'
-        if echo ${3} | grep -q "/" 2> /dev/null
-        then
-          __usage
-        fi
-        __be_exist ${POOL}/${BEDS}/${3}
-        if zfs list -H -o name ${POOL}/${BEDS}/${4} 1> /dev/null 2> /dev/null
-        then
-          echo "ERROR: Boot environment '${4}' already exists"
-          exit 1
-        fi
-        __be_new ${POOL}/${BEDS}/${3} ${POOL}/${BEDS}/${4}
-        ;;
-      (2)
-        if __be_snapshot ${2}
-        then
-          if ! doit zfs snapshot -r ${POOL}/${BEDS}/${2} 2> /dev/null
-          then
-            echo "ERROR: Cannot create '${2}' recursive snapshot"
-            exit 1
-          fi
-        else
-          __be_new ${ROOTFS} ${POOL}/${BEDS}/${2}
-        fi
-        ;;
-      (*)
-        __usage
-        ;;
-    esac
-    echo "Created successfully"
-    ;;
+# This has a bizarre calling convention: if the argument has an '@' in,
+# we are making a snapshot, otherwise we are creating a whole new BE. I
+# assume this comes from Solaris...
+beadm_create () {
+    local opt_e= name=
+    doopts "e:" name -- "$@" || usage
 
-  (activate) # ----------------------------------------------------------------
-    if [ ${#} -ne 2 ]
+    if in_str "$name" "@"
     then
-      __usage
-    fi
-    NEWROOT="${POOL}/${BEDS}/${2}"
-    __be_exist "${NEWROOT}"
-    if [ "${BOOTFS}" = "${NEWROOT}" ]
-    then
-      echo "Already activated"
-      exit 0
+        # making a snapshot
+        [ -n "$opt_e" ] && usage
+        local snap=$(resolve_be -s "$name")
+
+        doit zfs snapshot -r $snap ||
+            die "Cannot create '$snap' recursive snapshot"
     else
-      if __be_mounted ${NEWROOT}
-      then
-        MNT=$( mount | grep -E "^${NEWROOT} " | awk '{print $3}' )
-        if [ "${MNT}" != "/" ]
+        # making a new BE
+        local source=
+        if [ -n "$opt_e" ]
         then
-          # boot environment is not current root and its mounted
-          echo "ERROR: Boot environment '${2}' is mounted at '${MNT}'"
-          echo "ERROR: Cannot activate manually mounted boot environment"
-          exit 1
-        fi
-      fi
-      if [ "${ROOTFS}" != "${NEWROOT}" ]
-      then
-        doit zfs set canmount=noauto "${NEWROOT}"
-        if [ $(zfs list -Ho mounted "${NEWROOT}") = yes ]
-        then
-            doit zfs umount "${NEWROOT}"
-        fi
-
-        TMPMNT=$(mktemp -dt beadm)
-        # Use mount(8) rather than zfs(1) since this is just a temporary
-        # mount. We've just set canmount=noauto and made sure the FS is
-        # unmounted, so this is safe.
-        doit mount -t zfs "${NEWROOT}" "${TMPMNT}"
-        doit cp /boot/zfs/zpool.cache ${TMPMNT}/boot/zfs/zpool.cache # 2> /dev/null
-
-        LOADER_CONFIGS=""
-        for c in loader.conf loader.conf.local
-        do
-            c="${TMPMNT}/boot/$c"
-            [ -f "$c" ] && LOADER_CONFIGS="${LOADER_CONFIGS} ${c}"
-        done
-        vrm_line="$(cat <<VRM)"
-vfs.root.mountfrom="zfs:${NEWROOT}"
-VRM
-        if [ -n "${LOADER_CONFIGS}" ]
-        then
-            doit sed -i~ -E "$(cat <<SED)" ${LOADER_CONFIGS}
-                /^vfs\.root\.mountfrom/ {
-                    c \ 
-                    ${vrm_line}
-                    q
-                }
-                $ { p
-                    c \ 
-                    ${vrm_line}
-                }
-SED
-            for l in ${LOADER_CONFIGS}
-            do
-                doit rm -f ${l}~
-            done
+            source=$(resolve_be -se "$opt_e")
         else
-            if [ "$DOIT" = "YES" ]
-            then
-                echo "${vrm_line}" >"${TMPMNT}/boot/loader.conf"
-            else
-                cat <<CAT >&3
-+ echo '${vrm_line}' >${TMPMNT}/boot/loader.conf
-CAT
-            fi
+            source=$ROOTFS
         fi
 
-        doit umount ${TMPMNT}
-        rmdir ${TMPMNT}
-        # The correct settings for a root fs are canmount=noauto,
-        # mountpoint=/. The old recommendation of mountpoint=legacy
-        # causes problems with subordinate fsen which expect to inherit
-        # their mountpoint, which is why Sun introduced the canmount
-        # property in the first place. Since the fs is currently
-        # unmounted, changing mountpoint will not cause zfs(1) to remount
-        # the fs over the current root.
-        doit zfs set mountpoint=/ ${NEWROOT}
-      fi
-      if ! doit zpool set bootfs=${NEWROOT} ${POOL}
-      then
-        echo "ERROR: Failed to activate '${NEWROOT}'"
-        exit 1
-      fi
+        local dest=$(resolve_be "$name")
+        zfs_exist $dest && die "Boot environment '$name' already exists"
+
+        beadm_new $source $dest
     fi
+
+    echo "Created successfully"
+}
+
+beadm_activate () {
+    [ $# -eq 1 ] || usage
+    local newbe="$1"
+    local newroot=$(resolve_be -e "$newbe")
+
+    if [ "$BOOTFS" = "$newroot" ]
+    then
+        echo "Already active"
+        return
+    fi
+
+    if zfs_mounted $newroot
+    then
+        mnt="$(zfs_mountpoint $newroot)"
+
+        # We allow it to be mounted at /. We may have temporarily booted
+        # into the new BE, or we may be reactivating the current BE.
+        [ "$mnt" = "/" ] || die \
+            "Boot environment '$newbe' is mounted at '$mnt'" \
+            "Cannot activate mounted boot environment"
+    fi
+
+    [ "$ROOTFS" != "$newroot" ] && beadm_setup_root $newroot
+    doit zpool set bootfs=$newroot $POOL ||
+        die "Failed to activate '$newroot'"
+
     # The rest of the activation happens after reboot, in rc.d/zfs_be.
     echo "Activated successfully"
-    ;;
+}
 
-  (destroy) # -----------------------------------------------------------------
-    if [ "${2}" != "-F" ]
-    then
-      DESTROY=${2}
-    else
-      DESTROY=${3}
-    fi
-    DESTROY="${POOL}/${BEDS}/${DESTROY}"
-    __be_exist ${DESTROY}
-    case ${#} in
-      (2)
-        echo "Are you sure you want to destroy '${2}'?"
-        echo -n "This action cannot be undone (y/[n]): "
-        read CHOICE
-        ;;
-      (3)
-        if [ "${2}" != "-F" ]
-        then
-          __usage
-        fi
-        CHOICE=Y
-        ;;
-      (*)
-        __usage
-        ;;
-    esac
-    if [ "${BOOTFS}" = "${DESTROY}" ]
-    then
-      echo "ERROR: Cannot destroy active boot environment"
-      exit 1
-    fi
-    case ${CHOICE} in
-      (Y|y|[Yy][Ee][Ss])
-        # destroy snapshot or boot environment
-        if __be_snapshot ${DESTROY}
-        then
-          if ! doit zfs destroy -r ${DESTROY} 1> /dev/null 2> /dev/null
-          then
-            echo "ERROR: Snapshot '${2}' is origin for other boot environment"
-            exit 1
-          fi
-        else
-          if __be_clone ${DESTROY}
-          then
-            # promote clones dependent on snapshots used by destroyed boot environment
-            zfs list -H -t all -o name,origin -r ${POOL} \
-              | while read NAME ORIGIN
-                do
-                  if echo "${ORIGIN}" | grep -q -E "${DESTROY}(/.*@|@)" 2> /dev/null
-                  then
-                    doit zfs promote ${NAME}
-                  fi
-                done
-            # get origins used by destroyed boot environment
-            ORIGIN_SNAPSHOTS=$( zfs list -H -t all -o origin -r ${DESTROY} | grep -v '^-$' | awk -F "@" '{print $2}' | sort -u )
-          fi
-          # check if boot environment was created from existing snapshot
-          ORIGIN=$( zfs list -H -o origin ${DESTROY} )
-          CREATION=$( zfs list -H -o creation ${DESTROY} )
-          CREATION=$( date -j -f "%a %b %d %H:%M %Y" "${CREATION}" +"beadm-%Y%m%d%H%M" )
-          SNAPSHOT_NAME=$( echo "${ORIGIN}" | cut -d '@' -f 2 | sed -E 's/:[0-9]{2}$//g' )
-          if [ "${2}" = "-F" ]
-          then
-            CHOICE=1
-          elif [ "${SNAPSHOT_NAME}" != "${CREATION}" ]
-          then
-            ORIGIN=$( basename ${ORIGIN} )
-            echo "Boot environment '${DESTROY}' was created from existing snapshot"
-            echo -n "Destroy '${ORIGIN}' snapshot? (y/[n]): "
-            read CHOICE
-            case ${CHOICE} in
-              (Y|y|[Yy][Ee][Ss])
-                CHOICE=1
-                ;;
-              (*)
-                CHOICE=0
-                echo "Origin snapshot '${ORIGIN}' will be preserved"
-                ;;
-            esac
-          else
-            CHOICE=1
-          fi
-          # destroy boot environment
-          doit zfs destroy -r ${DESTROY}
-           # check if boot environment is a clone
-          if __be_clone ${DESTROY}
-          then
-            # promote datasets dependent on origins used by destroyed boot environment
-            ALL_ORIGINS=$( zfs list -H -t all -o name,origin -r ${POOL} )
-            echo "${ORIGIN_SNAPSHOTS}" \
-              | while read S
-                do
-                  echo "${ALL_ORIGINS}" \
-                    | grep "${S}" \
-                    | awk '{print $1}' \
-                    | while read I
-                      do
-                        doit zfs promote ${I}
-                      done
-                done
-          fi
-          # destroy origins used by destroyed boot environment
-          SNAPSHOTS=$( zfs list -H -t snapshot -o name -r ${POOL} )
-          echo "${ORIGIN_SNAPSHOTS}" \
-            | while read S
-              do
-                echo "${SNAPSHOTS}" \
-                  | grep "@${S}$" \
-                  | while read I
-                    do
-                      if [ ${CHOICE} -eq 1 ]
-                      then
-                        doit zfs destroy ${I}
-                      fi
-                    done
-              done
-        fi
-        # check if we need to update grub
-        if [ "${GRUB}" = YES ]
-        then
-          __update_grub
-        fi
-        echo "Destroyed successfully"
-        ;;
-      (*)
-        echo "Boot environment '${DESTROY}' has not been destroyed"
-        ;;
-    esac
-    ;;
+beadm_destroy () {
+    local be=
+    doopts "F" be -- "$@" || usage
 
-  (rename) # ------------------------------------------------------------------
-    if [ ${#} -ne 3 ]
+    local destroy=$(resolve_be -e "$be")
+    case "$destroy" in
+    $ROOTFS)
+        die "Cannot destroy current boot environment"   ;;
+    $BOOTFS)
+        die "Cannot destroy active boot environment"    ;;
+    esac
+
+    if [ -z "$opt_F" ] && ! confirm \
+        "Are you sure you want to destroy '$be'?" \
+        "This action cannot be undone (y/[n]): "
     then
-      __usage
+        echo "Boot environment '$be' has not been destroyed"
+        return
     fi
-    __be_exist ${POOL}/${BEDS}/${2}
-    if [ "${BOOTFS}" = "${POOL}/${BEDS}/${2}" ]
+            
+    if zfs_snap $destroy
     then
-      echo "ERROR: Renaming active boot environment is not supported"
-      exit 1
+        doit zfs destroy -r $destroy ||
+            die "Cannot destroy snapshot '$be'"
+        return
     fi
-    if zfs list -H -o name ${POOL}/${BEDS}/${3} 2> /dev/null
+
+    local origin_snapshots=
+    if zfs_clone $destroy
     then
-      echo "ERROR: Boot environment '${3}' already exists"
-      exit 1
+        # promote clones dependent on snapshots used by destroyed boot
+        # environment
+        local name= origin=
+        zfs list -Ho name,origin -r $POOL \
+        | while t_read name origin
+        do
+            cmatch "$origin" "$destroy@*|$destroy/*@*" \
+                || continue
+            doit zfs promote "$name"
+        done
+
+        origin_snapshots="$(
+            zfs list -Ho origin -r $destroy \
+            | while t_read origin
+            do
+                [ "$origin" = "-" ] && continue
+                echo ${origin##*@}
+            done \
+            | sort -u
+        )"
     fi
-    doit zfs rename ${POOL}/${BEDS}/${2} ${POOL}/${BEDS}/${3}
+
+    # check if boot environment was created from existing snapshot
+    local origin=$(zfs_get origin $destroy)
+    local origin_snap="${origin##*@}"
+    local destroy_origin=NO
+
+    # XXX There was some gubbins here about checking the creation date
+    # against the name of the snapshot. I don't think this is reliable:
+    # it's easier for the user if all @beadm-* snapshots belong to us.
+    if [ "$origin" != "-" ]
+    then
+        if [ -n "$opt_F" ] \
+        || fnmatch "$origin_snap" "beadm-*" \
+        || confirm
+            "Boot environment '${destroy}' was created from a snapshot." \
+            "Destroy '$origin'? (y/[n]): "
+        then
+            destroy_origin=YES
+        fi
+    fi
+        
+    # destroy boot environment
+    doit zfs destroy -r $destroy
+
+    if zfs_clone $destroy
+    then
+        # promote datasets dependent on origins used by destroyed boot
+        # environment
+        local s= i= rest=
+        local ALL_ORIGINS="$(zfs list -H -t all -o name,origin -r ${POOL})"
+        echo "$origin_snapshots" \
+        | while t_read s
+        do
+            echo "${ALL_ORIGINS}" \
+            | sgrep "@${s}$" \
+            | vgrep "^${destroy}" \
+            | while t_read i rest
+            do
+                doit zfs promote "$i"
+            done
+        done
+    fi
+
+    if [ "$destroy_origin" = YES ]
+    then
+        # destroy origins used by destroyed boot environment
+        # XXX This is terrifying. If I'm reading it right, it will
+        # destroy all snapshots in the pool which happen to be named the
+        # same as the source snap of the destroyed BE.
+        local SNAPSHOTS="$(zfs list -H -t snapshot -o name -r ${POOL})"
+        local s= i=
+        echo "$origin_snapshots" \
+        | while read s
+        do
+            echo "$SNAPSHOTS" \
+            | sgrep "@${s}$" \
+            | while read i
+            do
+                doit zfs destroy ${I}
+            done
+        done
+    fi
+
+    [ "${GRUB}" = YES ] && update_grub
+
+    echo "Destroyed successfully"
+}
+
+beadm_rename () {
+    local obe= nbe= ofs= nfs=
+    doopts - obe nbe -- "$@" || usage
+
+    ofs=$(resolve_be -e "$obe")
+    nfs=$(resolve_be "$nbe")
+
+    case "$obe" in
+    $ROOTFS)
+        die "Cannot rename current boot environment"    ;;
+    $BOOTFS)
+        die "Cannot rename active boot environment"     ;;
+    esac
+    zfs_exist $nfs && die "Boot environment '$nbe' already exists"
+
+    doit zfs rename $ofs $nfs
     echo "Renamed successfully"
-    ;;
+}
 
-  (mount) # ------------------------------------------------------------
-    if [ ${#} -eq 2 ]
+beadm_mount () {
+    local be= target=
+    [ $# -lt 1 -o $# -gt 2 ] && usage
+    be="$1"
+    if [ ${#} -eq 1 ]
     then
-      TARGET=$( mktemp -d -t BE-${2} )
-    elif [ ${#} -eq 3 ]
-    then
-      TARGET=${3}
+        target=$(mkdtemp "BE-$be")
     else
-      __usage
+        target="$2"
     fi
-    __be_exist "${POOL}/${BEDS}/${2}"
-    if __be_mounted "${POOL}/${BEDS}/${2}"
-    then
-      MNT=$( mount | grep -E "^${POOL}/${BEDS}/${2} " | awk '{print $3}' )
-      echo "Boot environment '${2}' is already mounted at '${MNT}'"
-      exit 1
-    fi
-    if ! doit mkdir -p ${TARGET} 2> /dev/null
-    then
-      echo "ERROR: Cannot create '${TARGET}' mountpoint"
-      exit 1
-    fi
-    if ! doit mount -t zfs ${POOL}/${BEDS}/${2} ${TARGET}
-    then
-      echo "ERROR: Cannot mount '${2}' at '${TARGET}' mountpoint"
-      exit 1
-    fi
-    zfs list -H -o name,mountpoint -r ${POOL}/${BEDS}/${2} \
-      | grep -v -E "[[:space:]](legacy|none)$" \
-      | sort -n \
-      | grep -E "^${POOL}/${BEDS}/${2}/" \
-      | while read FS MOUNTPOINT
-        do
-          if [ "{FS}" != "${POOL}/${BEDS}/${2}" ]
-          then
-            INHERIT=$( zfs get -H -o source mountpoint ${FS} )
-            if [ "${INHERIT}" = "local" ]
-            then
-              case ${MOUNTPOINT} in
-                (legacy|none)
-                  continue
-                  ;;
-                (*)
-                  MOUNTPOINT="/$( echo "${FS}" | sed s^"${POOL}/${BEDS}/${2}/"g )"
-                  ;;
-              esac
-            fi
-          fi
-          if ! doit mkdir -p ${TARGET}${MOUNTPOINT} 1> /dev/null 2> /dev/null
-          then
-            echo "ERROR: Cannot create '${TARGET}${MOUNTPOINT}' mountpoint"
-            exit 1
-          fi
-          if ! doit mount -t zfs ${FS} ${TARGET}${MOUNTPOINT} 1> /dev/null 2> /dev/null
-          then
-            echo "ERROR: Cannot mount '${FS}' at '${TARGET}${MOUNTPOINT}' mountpoint"
-            exit 1
-          fi
-        done
-    echo "Mounted successfully on '${TARGET}'"
-    ;;
 
-  (umount|unmount) # ----------------------------------------------------------
-    if [ ${#} -eq 2 ]
+    befs=$(resolve_be -e "$be")
+    [ "$(zfs_get mountpoint $befs)" = "/" ] ||
+        die "Mountpoint for '$befs' is not set properly." \
+            "A root fs should have mountpoint=/, canmount=noauto."
+
+    local fs= canm= dir=
+    zfs list -Ho name,canmount,mountpoint -s mountpoint -r $befs \
+    | while t_read fs canm dir
+    do
+        [ "$canm" = off ]           && continue
+        cmatch "$dir" "legacy|none" && continue
+        cmatch "$dir" "/*"          || die "Bad mountpoint '$dir' for '$fs'"
+
+        if zfs_mounted "$fs"
+        then
+            local mnt="$(zfs_mountpoint "$fs")"
+            die "'$fs' is already mounted on '$mnt'"
+        fi
+
+        dir="$target$dir"
+        doit mkdir -p "$dir" || die "Cannot create mountpoint '$dir'"
+        doit mount -t zfs "$fs" "$dir" ||
+            die "Cannot mount '$fs' on '$dir'"
+    done
+
+    echo "Mounted successfully on '${target}'"
+}
+
+beadm_umount () {
+    local opt_f= be=
+    doopts "f" be -- "$@" || usage
+
+    local befs=$(resolve_be -e "$be")
+    local mnt="$(zfs_mountpoint $befs)"
+
+    [ "$befs" = "$ROOTFS" ] && die \
+        "Cannot unmount current boot environment"
+
+    local fs=
+    zfs list -Ho name -S mountpoint -r $befs \
+    | while read fs
+    do
+        local dir="$(zfs_mountpoint "$fs")"
+        [ -n "$dir" ] || continue
+        doit umount $opt_f "$dir" || die \
+            "Cannot umount '$fs' (mounted on '$dir')"
+    done
+
+    if fnmatch "$mnt" "/tmp/BE-*"
     then
-      # we need this empty section for argument checking
-      :
-    elif [ ${#} -eq 3 -a "${2}" = "-f" ]
-    then
-      OPTS="-f"
-      shift
-    else
-      __usage
+        doit rmdir "$mnt"
     fi
-    __be_exist "${POOL}/${BEDS}/${2}"
-    if ! __be_mounted "${POOL}/${BEDS}/${2}"
-    then
-      echo "Boot environment '${2}' is not mounted"
-      exit 1
-    fi
-    MOUNT=$( mount )
-    MOUNTPOINT=$( echo "${MOUNT}" | grep -m 1 "^${POOL}/${BEDS}/${2} on " | awk '{print $3}' )
-    echo "${MOUNT}" \
-      | awk '{print $1}' \
-      | grep -E "^${POOL}/${BEDS}/${2}(/|$)" \
-      | sort -n -r \
-      | while read FS
-        do
-          if ! doit umount ${OPTS} ${FS} 1> /dev/null 2> /dev/null
-          then
-            echo "ERROR: Cannot umount '${FS}' dataset"
-            exit 1
-          fi
-        done
+
     echo "Unmounted successfully"
-    # only delete the temporary mountpoint directory
-    if echo "${MOUNTPOINT}" | grep -q -E "/BE-${2}\.[a-zA-Z0-9]{8}" 1> /dev/null 2> /dev/null
-    then
-      # delete only when it is an empty directory
-      if [ $( find ${MOUNTPOINT} | head | wc -l | bc ) -eq 1 ]
-      then
-        doit rm -r ${MOUNTPOINT}
-      fi
-    fi
-    ;;
+}
 
-  (*) # -----------------------------------------------------------------------
-    __usage
-    ;;
+## MAIN
 
+[ "$(sysctl -n kern.osreldate)" -lt 800000 ] &&
+    die "beadm works on FreeBSD 8.0 or later"
+
+if [ "${1}" = "--version" -o "${1}" = "version" ]
+then
+    echo "beadm 1.0 2013/10/13"
+    exit 0
+fi
+
+beadm_init
+
+while getopts "nv" opt
+do
+    case $opt in
+    n) DOIT="NO"       ;;
+    v) VERBOSE="YES"   ;;
+    esac
+done
+shift $(( $OPTIND - 1 ))
+
+[ $# -eq 0 ] && usage
+command="$1"
+shift
+
+case "$command" in
+    list)       beadm_list "$@"         ;;
+    create)     beadm_create "$@"       ;;
+    activate)   beadm_activate "$@"     ;;
+    destroy)    beadm_destroy "$@"      ;;
+    rename)     beadm_rename "$@"       ;;
+    mount)      beadm_mount "$@"        ;;
+    unmount|umount)
+                beadm_umount "$@"       ;;
+
+    *)          usage                   ;;
 esac
