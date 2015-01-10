@@ -14,28 +14,33 @@ required_modules="zfs"
 
 : ${zfs_be_root:=ROOT}
 
+HT="$(printf "\t")"
+
 zfs_be_start () {
     newbe="$(zfs list -Ho name /)"
     [ -z "$newbe" ] && return
 
     echo -n "Activating ZFS BE ${newbe}:"
 
+    # We have to promote root separately, since the loop below won't
+    # catch it.
+    origin="$(zfs list -Ho origin "$newbe")"
+    [ "$origin" = "-" ] || zfs promote "$newbe"
+
     beroot="${newbe%%/*}/${zfs_be_root}"
 
     # Hmm. This assumes BE fs names don't have spaces in...
     zfs list -Ho name,origin,canmount -rt filesystem "$beroot" \
-    | while read fs origin can
+    | while IFS="$HT" read fs origin can
     do
-        if [ "${fs#$newbe}" = "$fs" ]
+        if [ "${fs#$newbe/}" = "$fs" ]
         then
             # not part of the new BE
-            [ $can = on ] && zfs set canmount=noauto "$fs"
+            [ $can = on ]       && zfs set canmount=noauto "$fs"
         else
-            # part of the new BE: promote, set mountable, but not the
-            # root nor fsen with canmount=off
-            [ $origin = "-" ]       || zfs promote "$fs"
-            [ "$fs" = "$newbe" ]    && continue
-            [ $can = noauto ]       && zfs set canmount=on "$fs"
+            # part of the new BE
+            [ $origin = "-" ]   || zfs promote "$fs"
+            [ $can = noauto ]   && zfs set canmount=on "$fs"
         fi
     done
 
