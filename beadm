@@ -171,6 +171,24 @@ cmatch () {
     return 1
 }
 
+# We don't have sort or uniq, either. This doesn't require sorted input,
+# and doesn't produce sorted output. It's probably really slow, and
+# won't handle large amounts of input.
+
+xuniq () {
+    local done= l= m=
+
+    while read -r l
+    do
+        echo -n "$done" | while read -r m
+        do
+            [ "$l" = "$m" ] && continue 2
+        done
+        done="$done$l$NL"
+        echo "$l"
+    done
+}
+
 confirm () {
     local choice=
 
@@ -754,7 +772,7 @@ beadm_destroy () {
                 [ "$origin" = "-" ] && continue
                 echo ${origin##*@}
             done \
-            | sort -u
+            | xuniq
         )"
     fi
 
