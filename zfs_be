@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# PROVIDE: beadm
+# PROVIDE: zfs_be
 # REQUIRE: mountcritlocal
 # BEFORE: zfs
 
