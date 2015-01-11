@@ -408,7 +408,6 @@ beadm_setup_root () {
     # mount. We've just set canmount=noauto and made sure the FS is
     # unmounted, so this is safe.
     doit mount -t zfs $newroot $tmpmnt
-    doit cp /boot/zfs/zpool.cache $tmpmnt/boot/zfs/zpool.cache
 
     local loader_configs= l=
     for l in loader.conf loader.conf.local
