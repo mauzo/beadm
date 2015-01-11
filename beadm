@@ -223,7 +223,9 @@ mkdtemp () {
 }
 
 # check if system has a grub.cfg file and update it
-update_grub() {
+maybe_update_grub () {
+    [ "$GRUB" = YES ] || return
+
     if [ -e /boot/grub/grub.cfg ]
     then
         # XXX where does grub-mkconfig live?
@@ -392,10 +394,7 @@ PROP
     done
 
     # check if we need to update grub
-    if [ "${GRUB}" = YES ]
-    then
-        update_grub
-    fi
+    maybe_update_grub
 }
 
 beadm_setup_root () {
@@ -719,6 +718,7 @@ beadm_activate () {
     [ "$ROOTFS" != "$newroot" ] && beadm_setup_root $newroot
     doit zpool set bootfs=$newroot $POOL ||
         die "Failed to activate '$newroot'"
+    maybe_update_grub
 
     # The rest of the activation happens after reboot, in rc.d/zfs_be.
     echo "Activated successfully"
@@ -859,6 +859,7 @@ beadm_rename () {
     zfs_exist $nfs && die "Boot environment '$nbe' already exists"
 
     doit zfs rename $ofs $nfs
+    maybe_update_grub
     echo "Renamed successfully"
 }
 
