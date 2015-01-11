@@ -710,9 +710,7 @@ beadm_activate () {
 
         # We allow it to be mounted at /. We may have temporarily booted
         # into the new BE, or we may be reactivating the current BE.
-        [ "$mnt" = "/" ] || die \
-            "Boot environment '$newbe' is mounted at '$mnt'" \
-            "Cannot activate mounted boot environment"
+        [ "$mnt" = "/" ] || beadm_umount "$newbe"
     fi
 
     [ "$ROOTFS" != "$newroot" ] && beadm_setup_root $newroot
