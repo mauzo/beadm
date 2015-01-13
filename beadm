@@ -128,7 +128,8 @@ t_read () {
     read -r "$@"
 }
 
-# We don't have grep, so fake it. All use EREs.
+# We don't have grep, so fake it. All use EREs, and only read from
+# stdin.
 
 sgrep () { 
     sed -nEe"/$1/p" 
@@ -137,7 +138,7 @@ vgrep () {
     sed -Ee"/$1/d" 
 }
 qgrep () {
-    [ -n "$(sed -nEe"/$1/{= q}")" ]
+    [ -n "$(sed -nEe"/$1/{=;q;}")" ]
 }
 
 # Sometimes all you need is a string match.
@@ -222,22 +223,6 @@ mkdtemp () {
     echo "$try"
 }
 
-# check if system has a grub.cfg file and update it
-maybe_update_grub () {
-    [ "$GRUB" = YES ] || return
-
-    if [ -e /boot/grub/grub.cfg ]
-    then
-        # XXX where does grub-mkconfig live?
-        if doit grub-mkconfig -o /boot/grub/grub.cfg
-        then
-            echo "GRUB configuration updated successfully"
-        else
-            echo "WARNING: Failed to update GRUB configuration"
-        fi
-    fi
-}
-
 # check if boot environment exists
 zfs_exist() { # 1=DATASET
     zfs list -H -o name "${1}" 1> /dev/null 2> /dev/null
@@ -311,6 +296,63 @@ zfs_clone() { # 1=DATASET
         # boot environment does not exist
         return 2
     fi
+}
+
+# check if system has a grub.cfg file and update it
+maybe_update_grub () {
+    [ "$GRUB" = YES ] || return 0
+
+    if [ -e /boot/grub/grub.cfg ]
+    then
+        # XXX Where does grub-mkconfig live? Which grub.cfg should we
+        # be using, the one on the current system or the one on the new
+        # BE?
+        if doit grub-mkconfig -o /boot/grub/grub.cfg
+        then
+            echo "GRUB configuration updated successfully"
+        else
+            echo "WARNING: Failed to update GRUB configuration"
+        fi
+    fi
+}
+
+# FreeBSD systems before 10.0 need vfs.root.mountfrom set in
+# loader.conf. Later FreeBSD systems don't, so leave it alone.
+# Assumes $1 is unmounted.
+maybe_update_loader () {
+    local be="$1"
+    local mnt="$(mkdtemp beadm)"
+    local l=
+
+    doit mount -t zfs "$be" "$mnt"
+    # freebsd-version was introduced in 10.0.
+    if [ -e "$mnt/bin/freebsd-version" ]
+    then
+        for l in loader.conf loader.conf.local
+        do
+            [ -e "$mnt/boot/$l" ] || continue
+            qgrep '^vfs\.root\.mountfrom=' <"$mnt/boot/$l" && warn \
+                "vfs.root.mountfrom appears to be set in /boot/$l." \
+                "This is unnecessary and unhelpful with FreeBSD 10+."
+        done
+    else
+        for l in loader.conf loader.conf.local
+        do
+            l="$mnt/boot/$l"
+            [ -e "$l" ] || continue
+            doit sed -i~ -e'/vfs\.root\.mountfrom=/d' "$l"
+            doit rm "$l~"
+        done
+        local vrm="vfs.root.mountfrom=\"zfs:$be\""
+        if [ $DOIT = YES ]
+        then
+            echo "$vrm" >>"$mnt/boot/loader.conf"
+        else
+            echo "- echo '$vrm' >>$mnt/boot/loader.conf" >&3
+        fi
+    fi
+    doit umount "$mnt"
+    doit rmdir "$mnt"
 }
 
 ## BE FUNCTIONS
@@ -393,71 +435,8 @@ PROP
         [ "$canmount" != "off" ] && doit zfs set canmount=noauto "$clone"
     done
 
-    # check if we need to update grub
     maybe_update_grub
-}
-
-beadm_setup_root () {
-    local newroot="$1"
-
-    doit zfs set canmount=noauto $newroot
-    zfs_mounted $newroot && doit zfs umount $newroot
-
-    local tmpmnt=$(mkdtemp beadm)
-    # Use mount(8) rather than zfs(8) since this is just a temporary
-    # mount. We've just set canmount=noauto and made sure the FS is
-    # unmounted, so this is safe.
-    doit mount -t zfs $newroot $tmpmnt
-
-    local loader_configs= l=
-    for l in loader.conf loader.conf.local
-    do
-            l="$tmpmnt/boot/$l"
-            [ -f "$l" ] && loader_configs="$loader_configs $l"
-    done
-
-    vrm_line="$(cat <<VRM)"
-vfs.root.mountfrom="zfs:$newroot"
-VRM
-    if [ -n "$loader_configs" ]
-    then
-        doit sed -i~ -E "$(cat <<SED)" $loader_configs
-            /^vfs\.root\.mountfrom=/ {
-                c \ 
-                ${vrm_line}
-                q
-            }
-            $ { p
-                c \ 
-                ${vrm_line}
-            }
-SED
-        for l in $loader_configs
-        do
-            doit rm -f ${l}~
-        done
-    else
-        if [ "$DOIT" = "YES" ]
-        then
-            echo "$vrm_line" >"$tmpmnt/boot/loader.conf"
-        else
-            cat <<CAT >&3
-- echo '$vrm_line' >$tmpmnt/boot/loader.conf
-CAT
-        fi
-    fi
-
-    doit umount $tmpmnt
-    rmdir $tmpmnt
-
-    # The correct settings for a root fs are canmount=noauto,
-    # mountpoint=/. The old recommendation of mountpoint=legacy
-    # causes problems with subordinate fsen which expect to inherit
-    # their mountpoint, which is why Sun introduced the canmount
-    # property in the first place. Since the fs is currently
-    # unmounted, changing mountpoint will not cause zfs(1) to remount
-    # the fs over the current root.
-    doit zfs set mountpoint=/ $newroot
+    maybe_update_loader "$dest"
 }
 
 ## BEADM COMMANDS
@@ -703,18 +682,34 @@ beadm_activate () {
         return
     fi
 
-    if zfs_mounted $newroot
+    # We are allowed to activate the current root, which obviously we
+    # must not try to unmount. We may have temporarily booted into this
+    # BE, or we may be resetting the active BE.
+    if zfs_mounted $newroot && [ "$newroot" != "$ROOTFS" ]
     then
-        mnt="$(zfs_mountpoint $newroot)"
-
-        # We allow it to be mounted at /. We may have temporarily booted
-        # into the new BE, or we may be reactivating the current BE.
-        [ "$mnt" = "/" ] || beadm_umount "$newbe"
+        beadm_umount "$newbe"
     fi
 
-    [ "$ROOTFS" != "$newroot" ] && beadm_setup_root $newroot
-    doit zpool set bootfs=$newroot $POOL ||
-        die "Failed to activate '$newroot'"
+    # The correct settings for a root fs are canmount=noauto,
+    # mountpoint=/. The old recommendation of mountpoint=legacy
+    # causes problems with subordinate fsen which expect to inherit
+    # their mountpoint, which is why Sun introduced the canmount
+    # property in the first place. 
+    doit zfs set canmount=noauto $newroot
+    if [ "$newroot" = "$ROOTFS" ]
+    then
+        # Don't try to change the mountpoint property of the current
+        # root, it makes a mess.
+        [ "$(zfs_get mountpoint $newroot)" = "/" ] || warn \
+            "Can't change the mountpoint property of '$newroot'." \
+            "Filesystems below it may inherit the wrong mountpoint." \
+            "Consider changing it in single-user mode."
+    else
+        # Since the fs is currently unmounted, changing mountpoint will
+        # not cause zfs to remount the fs over the current root. 
+        doit zfs set mountpoint=/ $newroot
+    fi
+    doit zpool set bootfs=$newroot $POOL
     maybe_update_grub
 
     # The rest of the activation happens after reboot, in rc.d/zfs_be.
