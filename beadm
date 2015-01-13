@@ -121,6 +121,7 @@ doopts () {
 HT="$(printf '\t')"
 NL="$(printf '\nX')"
 NL="${NL%X}"
+FS="$(printf '\034')"
 
 # read tab-separated output from zfs list/get -H
 t_read () {
@@ -129,16 +130,16 @@ t_read () {
 }
 
 # We don't have grep, so fake it. All use EREs, and only read from
-# stdin.
+# stdin. Assume we don't want to use a rx with a literal FS in.
 
 sgrep () { 
-    sed -nEe"/$1/p" 
+    sed -nEe"\\${FS}$1${FS}p" 
 }
 vgrep () { 
-    sed -Ee"/$1/d" 
+    sed -Ee"\\${FS}$1${FS}d" 
 }
 qgrep () {
-    [ -n "$(sed -nEe"/$1/{=;q;}")" ]
+    [ -n "$(sed -nEe"\\${FS}$1${FS}{=;q;}")" ]
 }
 
 # Sometimes all you need is a string match.
@@ -163,24 +164,56 @@ fnmatch () {
     [ -z "${1##$2}" ]
 }
 
-# We don't have sort or uniq, either. This doesn't require sorted input,
-# and doesn't produce sorted output. It's probably really slow, and
-# won't handle large amounts of input.
+# uniq on the first field of the line. Assumes sorted input.
 
-xuniq () {
-    local done= l= m=
-    local IFS="$NL"
+uniq () {
+    local last="$NL"    # no line matches a newline character
+    local l= k=
 
     while read -r l
     do
-        for m in $done
-        do
-            [ "$l" = "$m" ] && continue 2
-        done
-        done="$done$l$NL"
+        k="${l%%$HT*}"
+        [ "$k" = "$last" ] && continue
+        last="$k"
         echo "$l"
     done
     return 0
+}
+
+# comm on &0 and &4. The two inputs must contain sorted uniq lines. Only
+# the first field of &0 is considered, but the whole line is output.
+
+fcomm () {
+    local l1= l2= k1=
+
+    while true
+    do
+        read -r l1          || return 0
+        k1="${l1%%$HT*}"
+        read -r l2 <&4      || return 0
+
+        while [ "$k1" "<" "$l2" ]
+        do
+            read -r l1      || return 0
+            k1="${l1%%$HT*}"
+        done
+        while [ "$l2" "<" "$k1" ]
+        do
+            read -r l2 <&4  || return 0
+        done
+        [ "$k1" = "$l2" ] && echo "$l1"
+    done
+    
+    return 0
+}
+
+# comm on two variables
+
+vcomm () {
+    echo -n "$2" | (
+        exec 4<&0
+        echo -n "$1" | fcomm
+    )
 }
 
 confirm () {
@@ -754,13 +787,13 @@ beadm_destroy () {
         done
 
         origin_snapshots="$(
-            zfs list -Ho origin -r $destroy \
+            zfs list -Ho origin -s origin -r $destroy \
             | while t_read origin
             do
                 [ "$origin" = "-" ] && continue
                 echo ${origin##*@}
             done \
-            | xuniq
+            | uniq
         )"
     fi
 
