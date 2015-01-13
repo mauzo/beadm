@@ -756,14 +756,6 @@ beadm_destroy () {
         die "Cannot destroy active boot environment"    ;;
     esac
 
-    if [ -z "$opt_F" ] && ! confirm \
-        "Are you sure you want to destroy '$be'?" \
-        "This action cannot be undone (y/[n]): "
-    then
-        echo "Boot environment '$be' has not been destroyed"
-        return
-    fi
-            
     if zfs_snap $destroy
     then
         doit zfs destroy -r $destroy ||
@@ -771,36 +763,10 @@ beadm_destroy () {
         return
     fi
 
-    local origin_snapshots=
-    if zfs_clone $destroy
-    then
-        # promote clones dependent on snapshots used by destroyed boot
-        # environment
-        local name= origin=
-        zfs list -Ho name,origin -r $POOL \
-        | while t_read name origin
-        do
-            case "$origin" in
-            $destroy@*|$destroy/*@*)
-                doit zfs promote "$name" ;;
-            esac
-        done
-
-        origin_snapshots="$(
-            zfs list -Ho origin -s origin -r $destroy \
-            | while t_read origin
-            do
-                [ "$origin" = "-" ] && continue
-                echo ${origin##*@}
-            done \
-            | uniq
-        )"
-    fi
-
     # check if boot environment was created from existing snapshot
     local origin=$(zfs_get origin $destroy)
     local origin_snap="${origin##*@}"
-    local destroy_origin=NO
+    local origin_snapshots=
 
     # XXX There was some gubbins here about checking the creation date
     # against the name of the snapshot. I don't think this is reliable:
@@ -809,53 +775,60 @@ beadm_destroy () {
     then
         if [ -n "$opt_F" ] \
         || fnmatch "$origin_snap" "beadm-*" \
-        || confirm
-            "Boot environment '${destroy}' was created from a snapshot." \
+        || confirm \
+            "Boot environment '$be' was created from a snapshot." \
             "Destroy '$origin'? (y/[n]): "
         then
-            destroy_origin=YES
+            origin_snapshots="$(
+                zfs list -Ho origin -s origin -r $destroy \
+                | uniq
+            )"
         fi
+    fi
+
+    local destroyed_snapshots="$(
+        zfs list -Ho name -s name -t snap -r \
+            $destroy \
+            $origin_snapshots
+    )"
+    local all_origins="$(
+        zfs list -Ho origin,name -s origin -r $POOL \
+        | vgrep "^-$HT" \
+        | vgrep "$HT$destroy(/|\$)" \
+        | uniq
+    )"
+    local promote="$(vcomm "$all_origins" "$destroyed_snapshots")"
+
+    if [ -z "$opt_F" ]
+    then
+        warn "You are about to destroy the following datasets:" \
+            "    $destroy (recursively)"
+        echo -n "$origin_snapshots" | sed -e's/^/    /' >&3
+        if ! confirm "Are you sure (y/[n])? "
+        then
+            echo "Boot environment '$be' has not been destroyed"
+            return
+        fi
+    fi
+            
+    # promote clones dependent on snapshots we are about to destroy
+    if [ -n "$promote" ]
+    then
+        local name= origin=
+        echo "$promote" | while t_read origin name
+        do
+            doit zfs promote "$name"
+        done
     fi
         
     # destroy boot environment
     doit zfs destroy -r $destroy
 
-    if zfs_clone $destroy
+    if [ -n "$origin_snapshots" ]
     then
-        # promote datasets dependent on origins used by destroyed boot
-        # environment
-        local s= i= rest=
-        local ALL_ORIGINS="$(zfs list -H -t all -o name,origin -r ${POOL})"
-        echo "$origin_snapshots" \
-        | while t_read s
+        echo "$origin_snapshots" | while read -r name
         do
-            echo "${ALL_ORIGINS}" \
-            | sgrep "@${s}$" \
-            | vgrep "^${destroy}" \
-            | while t_read i rest
-            do
-                doit zfs promote "$i"
-            done
-        done
-    fi
-
-    if [ "$destroy_origin" = YES ]
-    then
-        # destroy origins used by destroyed boot environment
-        # XXX This is terrifying. If I'm reading it right, it will
-        # destroy all snapshots in the pool which happen to be named the
-        # same as the source snap of the destroyed BE.
-        local SNAPSHOTS="$(zfs list -H -t snapshot -o name -r ${POOL})"
-        local s= i=
-        echo "$origin_snapshots" \
-        | while read s
-        do
-            echo "$SNAPSHOTS" \
-            | sgrep "@${s}$" \
-            | while read i
-            do
-                doit zfs destroy ${I}
-            done
+            doit zfs destroy "$name"
         done
     fi
 
