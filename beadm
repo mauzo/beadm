@@ -383,25 +383,24 @@ beadm_new() {
     if in_str "$source" "@"
     then
         # create boot environment from snapshot
-        local sn="${source##*@}"
-        snap="$source"
+        snap="${source##*@}"
         source="${source%@*}"
 
         zfs list -r -H -t filesystem -o name "$source" \
         | while t_read fs
         do
-            zfs_exist "$fs@$sn" ||
-                die "Child snapshot '$fs@$sn' does not exist"
+            zfs_exist "$fs@$snap" ||
+                die "Child snapshot '$fs@$snap' does not exist"
         done
     else
         # create boot environment from other boot environment
-        local fmt=$(date "+beadm-%Y%m%d%H%M%S")
-        snap="$source@$fmt"
+        snap=$(date "+beadm-%Y%m%d%H%M%S")
+        local mk="$source@$snap"
 
-        zfs_exist "$snap" && 
-            die "Snapshot '$snap' already exists"
-        doit zfs snapshot -r "$snap" ||
-            die "Cannot create snapshot '$snap'"
+        zfs_exist "$mk" && 
+            die "Snapshot '$mk' already exists"
+        doit zfs snapshot -r "$mk" ||
+            die "Cannot create snapshot '$mk'"
     fi
 
     # clone properties of source boot environment
@@ -420,9 +419,9 @@ beadm_new() {
         $(zfs get -Ho name,property,value -s local,received all "$fs")
 PROP
 
-        local clone="$dest${fs#$BEROOT}"
+        local clone="$dest${fs#$source}"
         # sometimes I really hate shell...
-        eval "doit zfs clone $opts \"$snap\" \"$clone\""
+        eval "doit zfs clone $opts \"$fs@$snap\" \"$clone\""
 
         # Cloning with canmount set to any value other than 'off' will
         # automount the filesystem, which would be Very Bad. So if we
