@@ -163,31 +163,24 @@ fnmatch () {
     [ -z "${1##$2}" ]
 }
 
-# Or a case expression.
-
-cmatch () {
-    case "$1" in
-    $2)   return 0    ;;
-    esac
-    return 1
-}
-
 # We don't have sort or uniq, either. This doesn't require sorted input,
 # and doesn't produce sorted output. It's probably really slow, and
 # won't handle large amounts of input.
 
 xuniq () {
     local done= l= m=
+    local IFS="$NL"
 
     while read -r l
     do
-        echo -n "$done" | while read -r m
+        for m in $done
         do
             [ "$l" = "$m" ] && continue 2
         done
         done="$done$l$NL"
         echo "$l"
     done
+    return 0
 }
 
 confirm () {
@@ -201,7 +194,10 @@ confirm () {
     echo -n "$1"
 
     read choice
-    cmatch "$choice" "[Yy]|[Yy][Ee][Ss]"
+    case "$choice" in
+        [Yy]|[Yy][Ee][Ss])  return 0    ;;
+        *)                  return 1    ;;
+    esac
 }
 
 # mktemp(1) is in /usr/bin
@@ -252,7 +248,7 @@ resolve_be () {
 
 # check if argument is a snapshot
 zfs_snap() { # 1=DATASET/SNAPSHOT
-    zfs list -Ho name -t snapshot >/dev/null 2>/dev/null
+    zfs list -Ho name -t snapshot "$1" >/dev/null 2>/dev/null
 }
 
 zfs_get() {
@@ -752,9 +748,10 @@ beadm_destroy () {
         zfs list -Ho name,origin -r $POOL \
         | while t_read name origin
         do
-            cmatch "$origin" "$destroy@*|$destroy/*@*" \
-                || continue
-            doit zfs promote "$name"
+            case "$origin" in
+            $destroy@*|$destroy/*@*)
+                doit zfs promote "$name" ;;
+            esac
         done
 
         origin_snapshots="$(
@@ -876,8 +873,11 @@ beadm_mount () {
     | while t_read fs canm dir
     do
         [ "$canm" = off ]           && continue
-        cmatch "$dir" "legacy|none" && continue
-        cmatch "$dir" "/*"          || die "Bad mountpoint '$dir' for '$fs'"
+        case "$dir" in
+            legacy|none) continue ;;
+            /*) ;;
+            *) die "Bad mountpoint '$dir' for '$fs'" ;;
+        esac
 
         if zfs_mounted "$fs"
         then
